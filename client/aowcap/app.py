@@ -50,6 +50,7 @@ class App:
     def __init__(self, root, start_hidden=False, just_updated=False):
         self.root = root
         self.pending_update = None
+        self.checkpointing = False
         self.installing_update = False
         self.cfg = Config()
         self.events = queue.Queue()
@@ -146,8 +147,14 @@ class App:
         ttk.Label(top, textvariable=self.rec_var, style="Stats.TLabel").pack(side="left", padx=14)
         self.auto_rec = tk.BooleanVar(value=self.cfg.get("auto_record", True))
         self.auto_up = tk.BooleanVar(value=self.cfg.get("auto_upload", True))
-        ttk.Checkbutton(rec, text="Record automatically when the game starts", variable=self.auto_rec,
-                        command=self._save_toggles).pack(anchor="w", pady=(10, 0))
+        opts = ttk.Frame(rec)
+        opts.pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(opts, text="Record automatically when the game starts", variable=self.auto_rec,
+                        command=self._save_toggles).pack(side="left")
+        self.autosave = tk.BooleanVar(value=self.cfg.get("autosave", True))
+        mins = int(self.cfg.get("autosave_minutes", 10) or 10)
+        ttk.Checkbutton(opts, text=f"Save and upload every {mins} min", variable=self.autosave,
+                        command=self._save_toggles).pack(side="left", padx=12)
 
         mark = ttk.Frame(rec)
         mark.pack(fill="x", pady=(12, 0))
@@ -229,6 +236,7 @@ class App:
         self.cfg["auto_record"] = self.auto_rec.get()
         self.cfg["auto_upload"] = self.auto_up.get()
         self.cfg["auto_update"] = self.auto_update.get()
+        self.cfg["autosave"] = self.autosave.get()
         self.cfg["close_to_tray"] = self.close_to_tray.get()
         self.cfg["start_in_tray"] = self.start_in_tray.get()
         self.cfg.save()
@@ -496,6 +504,8 @@ class App:
                     self._tray_action(val)
                 elif kind == "update_ready":
                     self._on_update_ready(val)
+                elif kind == "part_saved":
+                    self._on_part_saved(val)
         except queue.Empty:
             pass
         if self.recorder.recording:
@@ -504,6 +514,7 @@ class App:
                              f"raw {fmt_size(self.recorder.raw_size())}")
             self.rec_btn.config(text="■  Stop and save")
             self._set_pill("rec")
+            self._maybe_autosave()
             limit = self.cfg.get("raw_limit_mb", 4096) * 1024 * 1024
             if self.recorder.raw_size() > 0.85 * limit:
                 self.status.set("Raw capture is nearly full; stop and start a new recording soon.")
@@ -590,7 +601,38 @@ class App:
 
     def _idle_for_update(self):
         return (not self.recorder.recording and not self.busy and not self.watcher.pids
-                and self.uploads.empty())
+                and not self.checkpointing and self.uploads.empty())
+
+    # ------------------------------------------------------------ auto-save
+    def _maybe_autosave(self):
+        if not self.autosave.get() or self.busy or self.checkpointing:
+            return
+        minutes = max(1, int(self.cfg.get("autosave_minutes", 10) or 10))
+        if self.recorder.since_cut() < minutes * 60:
+            return
+        self.checkpointing = True
+
+        def work():
+            path, err = None, None
+            try:
+                path = self.recorder.checkpoint()
+            except Exception as e:
+                err = e
+            self.events.put(("part_saved", (path, err)))
+        threading.Thread(target=work, daemon=True, name="autosave").start()
+
+    def _on_part_saved(self, val):
+        path, err = val
+        self.checkpointing = False
+        if err:
+            applog(f"Auto-save failed: {err}")
+            self.status.set(f"Auto-save failed (still recording): {err}")
+            return
+        if path:
+            self.status.set(f"Saved {os.path.basename(path)}; still recording.")
+            if self.cfg.can_upload and self.cfg.get("auto_upload"):
+                self.uploads.put(path)
+            self.refresh_list()
 
     def _maybe_auto_update(self):
         if (self.pending_update and not self.installing_update and self.auto_update.get()

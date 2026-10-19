@@ -2,6 +2,13 @@
 
 ## v0.2.0
 
+- **Saves and uploads every 10 minutes** while recording (parts `_part01`, `_part02`, …),
+  so a crash or power cut loses at most the last few minutes. Recording carries on while
+  each part is saved and uploaded. Untick "Save and upload every 10 min" to save only at
+  the end.
+- **ExitLag NDIS mode:** when a booster is running, Packet Monitor records every network
+  layer, so the game's packets are caught before ExitLag's driver encrypts them (NDIS
+  mode). WFP mode keeps working through ExitLag's local relay.
 - **Updates itself.** Checks GitHub Releases at start and every 6 hours, downloads and
   verifies the new version (SHA-256), and installs it when you're not playing or
   recording. Untick "Install updates automatically" to install from the banner instead.

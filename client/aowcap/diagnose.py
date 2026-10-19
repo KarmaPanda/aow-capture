@@ -110,6 +110,8 @@ def report():
         add(f"  {label}: pid {pid} {exe}")
     relays = tunnel_listen_ports()
     add(f"Relay ports the recorder would use: {sorted(relays) or 'NONE'}")
+    add("Packet Monitor mode: " + ("every network layer (a booster is running; needed for ExitLag NDIS mode)"
+                                   if tun or cfg.get("pktmon_all_components") else "network cards only"))
     add("")
 
     listeners = _listeners()

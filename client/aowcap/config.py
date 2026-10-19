@@ -40,6 +40,10 @@ DEFAULTS = {
     "keep_raw": False,
     "capture_dir": "",
     "consent_given": False,
+    # While recording, save what's been captured so far as a part and upload it every N
+    # minutes; recording carries on into the next part.
+    "autosave": True,
+    "autosave_minutes": 10,
     # Self-update from GitHub Releases; installs when nothing is being recorded or played.
     "auto_update": True,
     "update_repo": "KarmaPanda/aow-capture",

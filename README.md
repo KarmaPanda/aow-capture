@@ -6,7 +6,12 @@ match the real game, and uploads them to the project.
 - Only the game's own connections to the official servers are saved. Everything else on
   the PC is dropped before anything is written, and the player's MAC/local IP are replaced.
 - Sessions on any other server (private servers, our emulator) are never recorded.
-- Works with ExitLag (records the game's link to ExitLag's local relay).
+- Works with ExitLag in both modes: WFP (the game talks to ExitLag's relay on 127.0.0.1,
+  recorded with a raw socket) and NDIS (Packet Monitor records every network layer, so the
+  game's packets are caught above ExitLag's driver).
+- Saves and uploads a part every 10 minutes while recording, without stopping it
+  (Packet Monitor's output file is switched in place with `logman update trace`; if that
+  fails it restarts Packet Monitor, leaving a gap of about a second, noted in the manifest).
 - Markers and notes, tray icon, resumable uploads, and it **updates itself** from this
   repo's releases.
 

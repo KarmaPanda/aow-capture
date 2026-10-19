@@ -26,8 +26,8 @@ Setup (once)
 
 Before you play
 ---------------
-- ExitLag is fine: the tool records the game's link to ExitLag on your own PC
-  (the part before ExitLag encrypts it). Windows may ask whether to allow
+- ExitLag is fine, in either redirection mode (WFP or NDIS): the tool records
+  the game's traffic before ExitLag encrypts it. Windows may ask whether to allow
   AoWCapture through the firewall the first time; allow it.
 - Other VPNs or game boosters: if the tool warns after saving that the game's
   connections "carried almost no data", quit the VPN/booster completely (not
@@ -49,6 +49,9 @@ Recording
   ("opening cultivation", "duel with X", "buying from gold shop"). Markers
   are timestamped and make the capture far more useful.
 - Add a note before stopping if something interesting happened.
+- While recording, everything captured so far is saved and uploaded every 10
+  minutes (as _part01, _part02, ...), so a crash or power cut only loses the
+  last few minutes. Recording keeps going while each part is saved.
 
 Running in the tray
 -------------------

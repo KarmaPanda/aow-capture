@@ -30,6 +30,10 @@ class LoopbackSniffer(threading.Thread):
         self.packets = 0
         self.error = None
         self._halt = threading.Event()
+        self._flock = threading.Lock()
+        self._out = None
+        self.seq = 0
+        self.part_packets = 0
         self._sock = None
 
     # ------------------------------------------------ ports
@@ -77,11 +81,30 @@ class LoopbackSniffer(threading.Thread):
         if self.is_alive():
             self.join(timeout=3)
 
+    def _open_file(self, path):
+        f = open(path, "wb")
+        f.write(shb_block("aow-capture loopback"))
+        f.write(idb_block(LINK_RAW, 65535, None))  # microsecond timestamps
+        return f
+
+    def rotate(self):
+        """Starts a new output file without losing packets; returns the finished file
+        and how many packets it holds."""
+        with self._flock:
+            old, n = self.path, self.part_packets
+            self.seq += 1
+            self.path = os.path.join(os.path.dirname(old), f"loopback{self.seq}.pcapng")
+            if self._out:
+                self._out.close()
+                self._out = self._open_file(self.path)
+            self.part_packets = 0
+        return old, n
+
     def run(self):
         last = 0
-        with open(self.path, "wb") as out:
-            out.write(shb_block("aow-capture loopback"))
-            out.write(idb_block(LINK_RAW, 65535, None))  # microsecond timestamps
+        with self._flock:
+            self._out = self._open_file(self.path)
+        try:
             while not self._halt.is_set():
                 now = time.time()
                 if now - last >= self.refresh:
@@ -98,13 +121,23 @@ class LoopbackSniffer(threading.Thread):
                     self.error = str(e)
                     break
                 if self.ports and self.keep(pkt):
-                    out.write(epb_block(0, time.time_ns() // 1000, pkt, len(pkt)))
-                    self.packets += 1
-        try:
-            self._sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
-            self._sock.close()
-        except OSError:
-            pass
+                    with self._flock:
+                        self._out.write(epb_block(0, time.time_ns() // 1000, pkt, len(pkt)))
+                        self.packets += 1
+                        self.part_packets += 1
+        finally:
+            with self._flock:
+                if self._out:
+                    self._out.close()
+                    self._out = None
+            try:
+                self._sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+            except (OSError, AttributeError):
+                pass
+            try:
+                self._sock.close()
+            except OSError:
+                pass
 
     def summary(self):
         return {"enabled": self.error is None, "error": self.error, "packets": self.packets,

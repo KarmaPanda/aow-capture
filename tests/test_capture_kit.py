@@ -128,9 +128,20 @@ def test_invite_roundtrip():
 
 
 class FakeSession:
-    def __init__(self, workdir, ports, limit, log=print):
+    def __init__(self, workdir, ports, limit, log=print, all_components=False):
         self.workdir, self.nics_only = workdir, True
         self.src = None
+        self.etl = "raw0.etl"
+        self.last_gap = None
+        self.rotations = 0
+
+    def rotate(self):
+        self.rotations += 1
+        old, self.etl = self.etl, f"raw{self.rotations}.etl"
+        return old
+
+    def discard(self, etl):
+        pass
 
     def start(self):
         pass
@@ -141,7 +152,7 @@ class FakeSession:
     def raw_size(self):
         return 0
 
-    def convert(self):
+    def convert(self, etl=None):
         return self.src
 
     def discard_raw(self):
@@ -540,3 +551,51 @@ def test_threads_stop_cleanly(tmp_path, monkeypatch):
     ft.stop()
     ft.join(timeout=2)
     assert not ft.is_alive()
+
+
+def test_autosave_parts_while_recording(tmp_path):
+    raw = sample(tmp_path)
+    cfg = Config(path=str(tmp_path / "cfg.json"))
+    cfg.update(capture_dir=str(tmp_path / "caps"), tester_name="Bob")
+    sessions = []
+
+    def factory(*a, **k):
+        s = FakeSession(*a, **k)
+        s.src = str(raw)
+        sessions.append(s)
+        return s
+    rec = Recorder(cfg, FakeWatcher(), log=lambda m: None, session_factory=factory, sniffer_factory=None)
+    rec.start()
+    rec.flows.add(6, LOCAL, 50001, SERVER, 2003)
+    rec.add_marker("before first save")
+    p1 = rec.checkpoint()
+    assert rec.recording and sessions[0].rotations == 1          # still recording after the save
+    rec.add_marker("after first save")
+    p2 = rec.checkpoint()
+    p3 = rec.stop("final note")
+    names = [os.path.basename(p) for p in (p1, p2, p3)]
+    assert [n.rsplit("_part", 1)[1] for n in names] == ["01.zip", "02.zip", "03.zip"]
+    mans = []
+    for p in (p1, p2, p3):
+        with zipfile.ZipFile(p) as z:
+            mans.append(json.loads(z.read("manifest.json")))
+    assert [m["part"] for m in mans] == [1, 2, 3] and [m["final"] for m in mans] == [False, False, True]
+    assert len({m["session_id"] for m in mans}) == 1
+    assert [x["text"] for x in mans[0]["markers"]] == ["before first save"]
+    assert [x["text"] for x in mans[1]["markers"]] == ["after first save"]
+    assert mans[2]["note"] == "final note"
+
+
+def test_single_save_has_no_part_suffix(tmp_path):
+    raw = sample(tmp_path)
+    cfg = Config(path=str(tmp_path / "cfg.json"))
+    cfg.update(capture_dir=str(tmp_path / "caps"), tester_name="Bob")
+
+    def factory(*a, **k):
+        s = FakeSession(*a, **k)
+        s.src = str(raw)
+        return s
+    rec = Recorder(cfg, FakeWatcher(), log=lambda m: None, session_factory=factory, sniffer_factory=None)
+    rec.start()
+    rec.flows.add(6, LOCAL, 50001, SERVER, 2003)
+    assert "_part" not in os.path.basename(rec.stop())

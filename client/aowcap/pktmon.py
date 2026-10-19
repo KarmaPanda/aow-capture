@@ -6,6 +6,7 @@ No driver install is needed (unlike Npcap), but it must run as administrator.
 import os
 import shutil
 import subprocess
+import time
 
 CREATE_NO_WINDOW = 0x08000000
 
@@ -42,17 +43,30 @@ def _run(args, check=True, timeout=300):
 
 
 class PktmonSession:
-    """One recording: start -> stop -> convert to pcapng."""
+    """One recording: start -> [rotate ...] -> stop -> convert each piece to pcapng.
 
-    def __init__(self, workdir, ports=(), raw_limit_mb=4096, log=print):
+    rotate() starts a new raw file while recording continues, so a finished piece can be
+    saved and uploaded. It first asks ETW to switch pktmon's output file in place
+    (`logman update trace <session> -o <file> -ets`, no gap); if that isn't possible it
+    restarts pktmon (a gap of about a second, logged).
+    """
+
+    def __init__(self, workdir, ports=(), raw_limit_mb=4096, log=print, all_components=False):
+        """all_components: record at every layer of the network stack, not just the
+        network cards. Needed with ExitLag's NDIS mode (and similar drivers), which
+        encrypt the game's packets below Windows' TCP/IP: the plain packets only exist
+        above that driver. Duplicates across layers are removed at save."""
         self.workdir = workdir
+        self.all_components = all_components
         self.ports = [int(p) for p in ports]
         self.raw_limit_mb = int(raw_limit_mb)
         self.log = log
-        self.etl = os.path.join(workdir, "raw.etl")
-        self.pcapng = os.path.join(workdir, "raw.pcapng")
+        self.seq = 0
+        self.etl = os.path.join(workdir, "raw0.etl")
         self.nics_only = False
         self.running = False
+        self.last_gap = None      # seconds lost by the last rotate (None = gapless)
+        self._etw_name = None
 
     def start(self):
         os.makedirs(self.workdir, exist_ok=True)
@@ -63,8 +77,15 @@ class PktmonSession:
             self.log(f"Capture filter: ports {', '.join(map(str, self.ports))}")
         else:
             self.log("No server ports configured: recording all traffic, game traffic is filtered out at save.")
-        base = ["start", "--capture", "--pkt-size", "0", "--file-name", self.etl,
+        self._start_capture(self.etl)
+
+    def _start_capture(self, etl):
+        base = ["start", "--capture", "--pkt-size", "0", "--file-name", etl,
                 "--file-size", str(self.raw_limit_mb)]
+        if self.all_components:
+            _run(base)
+            self.nics_only = False
+            return self._started()
         try:
             _run(base + ["--comp", "nics"])
             self.nics_only = True
@@ -72,6 +93,9 @@ class PktmonSession:
             self.log(f"'--comp nics' not supported, recording every component ({e})")
             _run(base)
             self.nics_only = False
+        self._started()
+
+    def _started(self):
         self.running = True
 
     def stop(self):
@@ -86,23 +110,85 @@ class PktmonSession:
         except OSError:
             return 0
 
-    def convert(self):
-        if not os.path.exists(self.etl):
-            raise PktmonError("pktmon produced no capture file.")
+    # ---------------------------------------------------------------- rotation
+    def _etw_session(self):
+        if self._etw_name:
+            return self._etw_name
         try:
-            _run(["etl2pcap", self.etl, "--out", self.pcapng])
-        except PktmonError:
-            _run(["pcapng", self.etl, "-o", self.pcapng])
-        if not os.path.exists(self.pcapng):
-            raise PktmonError("Converting the capture to pcapng failed.")
-        return self.pcapng
+            out = subprocess.run(["logman", "query", "-ets"], capture_output=True, text=True,
+                                 errors="replace", timeout=30,
+                                 creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        for line in out.splitlines():
+            name = line.strip().split("  ")[0].strip()
+            if name.lower().startswith("pktmon"):
+                self._etw_name = name
+                return name
+        return None
 
-    def discard_raw(self):
-        for p in (self.etl, self.pcapng):
+    def rotate(self):
+        """Switches recording to a new raw file; returns the finished file's path."""
+        old = self.etl
+        self.seq += 1
+        new = os.path.join(self.workdir, f"raw{self.seq}.etl")
+        name = self._etw_session()
+        if name:
+            try:
+                r = subprocess.run(["logman", "update", "trace", name, "-o", new, "-ets"],
+                                   capture_output=True, text=True, errors="replace", timeout=30,
+                                   creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+                if r.returncode == 0:
+                    self.etl = new
+                    self.last_gap = None
+                    return old
+                self.log(f"logman couldn't switch files ({(r.stdout + r.stderr).strip()[:200]}); "
+                         "restarting Packet Monitor instead")
+            except (OSError, subprocess.TimeoutExpired) as e:
+                self.log(f"logman failed ({e}); restarting Packet Monitor instead")
+        t0 = time.time()
+        _run(["stop"], check=False)
+        self.running = False
+        self._start_capture(new)          # filters stay in place across stop/start
+        self.etl = new
+        self.last_gap = round(time.time() - t0, 2)
+        self.log(f"Switched files by restarting Packet Monitor (gap ~{self.last_gap} s)")
+        return old
+
+    # ---------------------------------------------------------------- conversion
+    def convert(self, etl=None):
+        etl = etl or self.etl
+        out = os.path.splitext(etl)[0] + ".pcapng"
+        if not os.path.exists(etl):
+            raise PktmonError("pktmon produced no capture file.")
+        last = None
+        for attempt in range(4):  # a just-switched file may still be closing
+            try:
+                try:
+                    _run(["etl2pcap", etl, "--out", out])
+                except PktmonError:
+                    _run(["pcapng", etl, "-o", out])
+                if os.path.exists(out):
+                    return out
+            except PktmonError as e:
+                last = e
+            time.sleep(1 + attempt)
+        raise PktmonError(f"Converting the capture to pcapng failed. {last or ''}")
+
+    def discard(self, etl):
+        for p in (etl, os.path.splitext(etl)[0] + ".pcapng"):
             try:
                 os.remove(p)
             except OSError:
                 pass
+
+    def discard_raw(self):
+        for name in os.listdir(self.workdir) if os.path.isdir(self.workdir) else []:
+            if name.startswith("raw") and name.endswith((".etl", ".pcapng")):
+                try:
+                    os.remove(os.path.join(self.workdir, name))
+                except OSError:
+                    pass
 
 
 def cleanup():
