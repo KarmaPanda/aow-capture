@@ -27,14 +27,11 @@ itself up to date.
 
 1. Bump `VERSION` in `client/aowcap/__init__.py` and add a `## vX.Y.Z` section to
    `CHANGELOG.md`.
-2. Commit, then tag and push:
-   ```
-   git tag v0.2.1
-   git push origin main v0.2.1
-   ```
-3. The **Release** workflow tests, builds `AoWCapture.exe` (with the icon) on Windows and
-   publishes a release with `AoWCapture.exe`, `AoWCapture.zip` and `SHA256SUMS.txt`. It
-   refuses to publish if the tag doesn't match `VERSION`.
+2. Commit and push to `main`. No tag needed.
+3. The **Release** workflow sees that `vX.Y.Z` hasn't been released yet, tests, builds
+   `AoWCapture.exe` (with the icon) on Windows and publishes release `vX.Y.Z` (tag created
+   for you) with `AoWCapture.exe`, `AoWCapture.zip` and `SHA256SUMS.txt`. Pushes that
+   don't change `VERSION` don't release anything.
 4. Every installed copy checks `releases/latest` at start and every 6 hours, downloads the
    exe, checks it against `SHA256SUMS.txt`, and swaps itself when nothing is being played,
    recorded or uploaded (or when the player clicks *Restart and update*). The old exe is
