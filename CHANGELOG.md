@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.1
+
+- **Sharp on high-DPI displays.** The window is now DPI-aware: at 125/150/200 % scaling
+  text, checkboxes, buttons, the icon and spacing are drawn at full resolution instead of
+  being stretched (the theme's images and pixel sizes are scaled to match).
+
 ## v0.2.0
 
 - **Saves and uploads every 10 minutes** while recording (parts `_part01`, `_part02`, …),

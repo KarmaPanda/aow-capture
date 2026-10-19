@@ -67,8 +67,9 @@ class App:
         self.tray = traymod.Tray(lambda action: self.events.put(("tray", action)))
 
         root.title(f"{APP_NAME} {VERSION}")
-        root.minsize(680, 680)
-        root.geometry("720x800")
+        self.scale = theme.dpi_scale(root)
+        root.minsize(self.px(680), self.px(680))
+        root.geometry(f"{self.px(720)}x{self.px(800)}")
         self._build()
         self.refresh_list()
 
@@ -85,7 +86,7 @@ class App:
                                  "Windows 10 version 2004 or newer is required.")
 
         if self.tray.start():
-            self.tray_row.pack(anchor="w", pady=(4, 0))
+            self.tray_row.pack(anchor="w", pady=(self.px(4), self.px(0)))
             root.bind("<Unmap>", self._on_unmap)
             traymod.listen_for_show(lambda action: self.events.put(("tray", action)))
             if start_hidden or self.cfg.get("start_in_tray"):
@@ -105,11 +106,11 @@ class App:
     def _build(self):
         root = self.root
         self.pal = theme.apply(root)
-        outer = ttk.Frame(root, padding=(16, 12, 16, 0))
+        outer = ttk.Frame(root, padding=(self.px(16), self.px(12), self.px(16), self.px(0)))
         outer.pack(fill="both", expand=True)
 
         # Update banner (shown only when an update is waiting)
-        self.update_bar = ttk.Frame(outer, style="Banner.TFrame", padding=(12, 8))
+        self.update_bar = ttk.Frame(outer, style="Banner.TFrame", padding=(self.px(12), self.px(8)))
         self.update_var = tk.StringVar()
         ttk.Label(self.update_bar, textvariable=self.update_var, style="Banner.TLabel").pack(side="left")
         self.update_btn = ttk.Button(self.update_bar, text="Restart and update", style="Accent.TButton",
@@ -118,58 +119,58 @@ class App:
 
         # Header: icon, name, game status, recording pill
         head = ttk.Frame(outer)
-        head.pack(fill="x", pady=(0, 10))
+        head.pack(fill="x", pady=(self.px(0), self.px(10)))
         self.update_bar_anchor = head
-        img = theme.icon_image(48)
+        img = theme.icon_image(self.px(48))
         if img is not None:
             from PIL import ImageTk
             self._head_icon = ImageTk.PhotoImage(img)
-            ttk.Label(head, image=self._head_icon).pack(side="left", padx=(0, 12))
+            ttk.Label(head, image=self._head_icon).pack(side="left", padx=(self.px(0), self.px(12)))
         titles = ttk.Frame(head)
         titles.pack(side="left", fill="x", expand=True)
         ttk.Label(titles, text=APP_NAME, style="Title.TLabel").pack(anchor="w")
         self.game_var = tk.StringVar(value="Looking for the game…")
         ttk.Label(titles, textvariable=self.game_var, style="Muted.TLabel").pack(anchor="w")
-        self.pill = tk.Label(head, text="IDLE", padx=10, pady=3, bd=0,
+        self.pill = tk.Label(head, text="IDLE", padx=self.px(10), pady=self.px(3), bd=0,
                              font=("Segoe UI", 9, "bold") if os.name == "nt" else ("TkDefaultFont", 9, "bold"))
-        self.pill.pack(side="right", anchor="n", pady=(4, 0))
+        self.pill.pack(side="right", anchor="n", pady=(self.px(4), self.px(0)))
         self._set_pill("idle")
 
         # Recording card
-        rec = ttk.LabelFrame(outer, text="Recording", style="Card.TLabelframe", padding=12)
-        rec.pack(fill="x", pady=(0, 10))
+        rec = ttk.LabelFrame(outer, text="Recording", style="Card.TLabelframe", padding=self.px(12))
+        rec.pack(fill="x", pady=(self.px(0), self.px(10)))
         top = ttk.Frame(rec)
         top.pack(fill="x")
         self.rec_btn = ttk.Button(top, text="●  Start recording", style="Accent.TButton",
                                   command=self.toggle, width=20)
         self.rec_btn.pack(side="left")
         self.rec_var = tk.StringVar(value="Not recording")
-        ttk.Label(top, textvariable=self.rec_var, style="Stats.TLabel").pack(side="left", padx=14)
+        ttk.Label(top, textvariable=self.rec_var, style="Stats.TLabel").pack(side="left", padx=self.px(14))
         self.auto_rec = tk.BooleanVar(value=self.cfg.get("auto_record", True))
         self.auto_up = tk.BooleanVar(value=self.cfg.get("auto_upload", True))
         opts = ttk.Frame(rec)
-        opts.pack(fill="x", pady=(10, 0))
+        opts.pack(fill="x", pady=(self.px(10), self.px(0)))
         ttk.Checkbutton(opts, text="Record automatically when the game starts", variable=self.auto_rec,
                         command=self._save_toggles).pack(side="left")
         self.autosave = tk.BooleanVar(value=self.cfg.get("autosave", True))
         mins = int(self.cfg.get("autosave_minutes", 10) or 10)
         ttk.Checkbutton(opts, text=f"Save and upload every {mins} min", variable=self.autosave,
-                        command=self._save_toggles).pack(side="left", padx=12)
+                        command=self._save_toggles).pack(side="left", padx=self.px(12))
 
         mark = ttk.Frame(rec)
-        mark.pack(fill="x", pady=(12, 0))
+        mark.pack(fill="x", pady=(self.px(12), self.px(0)))
         ttk.Label(mark, text="Marker", style="Muted.TLabel").pack(anchor="w")
         row = ttk.Frame(mark)
-        row.pack(fill="x", pady=(2, 0))
+        row.pack(fill="x", pady=(self.px(2), self.px(0)))
         self.marker = ttk.Entry(row)
         self.marker.pack(side="left", fill="x", expand=True)
         self.marker.bind("<Return>", lambda e: self.add_marker())
-        ttk.Button(row, text="Add", command=self.add_marker).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Add", command=self.add_marker).pack(side="left", padx=(self.px(8), self.px(0)))
         ttk.Label(mark, text="What are you doing right now? e.g. “opening cultivation”, “duel with X”",
-                  style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+                  style="Muted.TLabel").pack(anchor="w", pady=(self.px(2), self.px(0)))
 
-        ttk.Label(rec, text="Note for this recording", style="Muted.TLabel").pack(anchor="w", pady=(10, 2))
-        self.note = tk.Text(rec, height=2, wrap="word", relief="flat", borderwidth=1, padx=8, pady=6,
+        ttk.Label(rec, text="Note for this recording", style="Muted.TLabel").pack(anchor="w", pady=(self.px(10), self.px(2)))
+        self.note = tk.Text(rec, height=2, wrap="word", relief="flat", borderwidth=1, padx=self.px(8), pady=self.px(6),
                             bg=self.pal["field"], fg=self.pal["field_text"],
                             insertbackground=self.pal["field_text"], highlightthickness=1,
                             highlightbackground=self.pal["border"], highlightcolor=self.pal["accent"],
@@ -177,10 +178,10 @@ class App:
         self.note.pack(fill="x")
 
         # Captures card
-        listf = ttk.LabelFrame(outer, text="Saved captures", style="Card.TLabelframe", padding=12)
-        listf.pack(fill="both", expand=True, pady=(0, 10))
+        listf = ttk.LabelFrame(outer, text="Saved captures", style="Card.TLabelframe", padding=self.px(12))
+        listf.pack(fill="both", expand=True, pady=(self.px(0), self.px(10)))
         up = ttk.Frame(listf)
-        up.pack(fill="x", pady=(0, 8))
+        up.pack(fill="x", pady=(self.px(0), self.px(8)))
         self.up_var = tk.StringVar()
         ttk.Label(up, textvariable=self.up_var, style="Muted.TLabel").pack(side="left")
         ttk.Button(up, text="Invite code…", command=self.enter_invite).pack(side="right")
@@ -192,24 +193,24 @@ class App:
         self.tree.heading("#0", text="File", anchor="w")
         self.tree.heading("size", text="Size", anchor="e")
         self.tree.heading("status", text="   Status", anchor="w")
-        self.tree.column("#0", width=330)
-        self.tree.column("size", width=90, anchor="e")
-        self.tree.column("status", width=170)
+        self.tree.column("#0", width=self.px(330))
+        self.tree.column("size", width=self.px(90), anchor="e")
+        self.tree.column("status", width=self.px(170))
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         btns = ttk.Frame(listf)
-        btns.pack(fill="x", pady=(8, 0), side="bottom", before=tf)
+        btns.pack(fill="x", pady=(self.px(8), self.px(0)), side="bottom", before=tf)
         ttk.Button(btns, text="Upload selected", command=self.upload_selected).pack(side="left")
-        ttk.Button(btns, text="Open folder", command=self.open_folder).pack(side="left", padx=6)
+        ttk.Button(btns, text="Open folder", command=self.open_folder).pack(side="left", padx=self.px(6))
         ttk.Button(btns, text="Delete", command=self.delete_selected).pack(side="left")
         ttk.Button(btns, text="Name…", command=self.ask_name).pack(side="right")
-        ttk.Button(btns, text="Diagnostics…", command=self.diagnostics).pack(side="right", padx=6)
+        ttk.Button(btns, text="Diagnostics…", command=self.diagnostics).pack(side="right", padx=self.px(6))
 
         # Settings
         sett = ttk.Frame(outer)
-        sett.pack(fill="x", pady=(0, 6), side="bottom", before=listf)  # keeps its space when short
+        sett.pack(fill="x", pady=(self.px(0), self.px(6)), side="bottom", before=listf)  # keeps its space when short
         self.settings_frame = sett
         self.auto_update = tk.BooleanVar(value=self.cfg.get("auto_update", True))
         opts = ttk.Frame(sett)
@@ -217,14 +218,14 @@ class App:
         ttk.Checkbutton(opts, text="Upload automatically", variable=self.auto_up,
                         command=self._save_toggles).pack(side="left")
         ttk.Checkbutton(opts, text="Install updates automatically", variable=self.auto_update,
-                        command=self._save_toggles).pack(side="left", padx=12)
+                        command=self._save_toggles).pack(side="left", padx=self.px(12))
         self.tray_row = ttk.Frame(sett)
         self.close_to_tray = tk.BooleanVar(value=self.cfg.get("close_to_tray", True))
         self.start_in_tray = tk.BooleanVar(value=self.cfg.get("start_in_tray", False))
         ttk.Checkbutton(self.tray_row, text="Keep running in the tray when closed or minimized",
                         variable=self.close_to_tray, command=self._save_toggles).pack(side="left")
         ttk.Checkbutton(self.tray_row, text="Start hidden in the tray", variable=self.start_in_tray,
-                        command=self._save_toggles).pack(side="left", padx=12)
+                        command=self._save_toggles).pack(side="left", padx=self.px(12))
 
         ttk.Separator(root).pack(fill="x", side="bottom", before=outer)
         self.status = tk.StringVar()
@@ -557,6 +558,10 @@ class App:
         if then_exit:
             self._exit()
 
+    def px(self, n):
+        """Pixels at 96 DPI -> pixels on this display."""
+        return int(round(n * getattr(self, "scale", 1.0)))
+
     def _set_pill(self, state):
         if getattr(self, "_pill_state", None) == state:
             return
@@ -594,7 +599,7 @@ class App:
         self.pending_update = val
         u = val[1]
         self.update_var.set(f"Version {u.label} is ready to install.")
-        self.update_bar.pack(fill="x", pady=(0, 10), before=self.update_bar_anchor)
+        self.update_bar.pack(fill="x", pady=(self.px(0), self.px(10)), before=self.update_bar_anchor)
         self.status.set(f"Update {u.label} downloaded.")
         if self.hidden:
             self.tray.notify(f"Update {u.label} downloaded. It installs when you're not playing.")
@@ -766,6 +771,7 @@ def single_instance():
 
 
 def main(start_hidden=False, wait_pid=None):
+    theme.enable_dpi_awareness()
     if wait_pid:  # started by the updater: let the old copy exit first
         upd.wait_for_pid(wait_pid)
         upd.cleanup_after_update()

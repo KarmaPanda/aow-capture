@@ -64,6 +64,83 @@ def icon_image(size=64):
         return None
 
 
+# ------------------------------------------------------------------ high DPI
+
+def enable_dpi_awareness():
+    """Call before the first Tk window. Without it Windows renders the app at 96 DPI and
+    stretches the bitmap (blurry on 150%/200% displays). System-aware rather than
+    per-monitor: Tk doesn't re-layout when moved between monitors with different scaling."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)   # PROCESS_SYSTEM_DPI_AWARE
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def dpi_scale(root):
+    """1.0 at 96 DPI, 1.5 at 150 %, 2.0 at 200 %."""
+    try:
+        return max(1.0, round(root.winfo_fpixels("1i") / 96.0, 2))
+    except Exception:
+        return 1.0
+
+
+def _scaled_sv_ttk(scale):
+    """A copy of the sv_ttk theme with its images, element sizes and pixel fonts scaled.
+    sv_ttk draws everything from a 1x sprite sheet with pixel sizes, which would look tiny
+    (or blurry if stretched) on a scaled display. Cached per scale factor."""
+    import re
+    import shutil
+    from PIL import Image
+    from .config import app_dir
+    src = os.path.dirname(sv_ttk.__file__)
+    ver = getattr(sv_ttk, "__version__", "") or str(int(os.path.getmtime(os.path.join(src, "sv.tcl"))))
+    dst = os.path.join(app_dir(), "theme-cache", f"sv_ttk-{ver}-{scale:.2f}")
+    done = os.path.join(dst, ".done")
+    if os.path.exists(done):
+        return os.path.join(dst, "sv.tcl")
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.py", "*.pyc"))
+
+    def sc(n):
+        return str(max(1, int(round(int(n) * scale)))) if int(n) else "0"
+
+    # pixel fonts:  font create X -family "..." -size -14
+    p = os.path.join(dst, "sv.tcl")
+    t = open(p, encoding="utf-8").read()
+    t = re.sub(r"(-size\s+)-(\d+)", lambda m: f"{m.group(1)}-{sc(m.group(2))}", t)
+    open(p, "w", encoding="utf-8").write(t)
+
+    for theme in ("light", "dark"):
+        sheet = os.path.join(dst, "theme", f"spritesheet_{theme}.png")
+        img = Image.open(sheet)
+        img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS).save(sheet)
+        # sprite rectangles: name x y w h  (scale edges so neighbours stay aligned)
+        sp = os.path.join(dst, "theme", f"sprites_{theme}.tcl")
+        t = open(sp, encoding="utf-8").read()
+
+        def rect(m):
+            x, y, w, h = (int(v) for v in m.group(2, 3, 4, 5))
+            x2, y2 = round((x + w) * scale), round((y + h) * scale)
+            x1, y1 = round(x * scale), round(y * scale)
+            return f"{m.group(1)} {x1} {y1} {x2 - x1} {y2 - y1}"
+        t = re.sub(r"(^\s*[\w-]+) (\d+) (\d+) (\d+) (\d+)", rect, t, flags=re.M)
+        open(sp, "w", encoding="utf-8").write(t)
+        # element/style sizes in pixels
+        tp = os.path.join(dst, "theme", f"{theme}.tcl")
+        t = open(tp, encoding="utf-8").read()
+        t = re.sub(r"(-(?:border|padding|width|height|expand|sashthickness)\s+)(\{[0-9 ]+\}|\d+)",
+                   lambda m: m.group(1) + re.sub(r"\d+", lambda d: sc(d.group(0)), m.group(2)), t)
+        open(tp, "w", encoding="utf-8").write(t)
+    open(done, "w").close()
+    return os.path.join(dst, "sv.tcl")
+
+
 def mode():
     try:
         return "dark" if darkdetect and darkdetect.isDark() else "light"
@@ -74,19 +151,33 @@ def mode():
 def apply(root):
     """Applies the theme and window icon; returns the palette dict in use."""
     m = mode()
+    scale = dpi_scale(root)
     if sv_ttk is not None:
         try:
-            sv_ttk.set_theme(m, root)
+            if scale > 1.05:
+                from tkinter import ttk as _ttk
+                st0 = _ttk.Style(root)
+                st0.tk.call("source", _scaled_sv_ttk(scale))
+                root._sv_ttk_loaded = True
+                st0.theme_use(f"sun-valley-{m}")
+            else:
+                sv_ttk.set_theme(m, root)
         except Exception:
-            m = "light"
-    pal = dict(PALETTE[m], mode=m)
+            try:
+                sv_ttk.set_theme(m, root)
+            except Exception:
+                m = "light"
+    pal = dict(PALETTE[m], mode=m, scale=scale)
+
+    def px(n):
+        return int(round(n * scale))
 
     path = icon_path()
     try:
         if path and os.name == "nt":
             root.iconbitmap(default=path)
         else:
-            img = icon_image(64)
+            img = icon_image(px(64))
             if img is not None:
                 from PIL import ImageTk
                 root._icon_ref = ImageTk.PhotoImage(img)
@@ -102,13 +193,13 @@ def apply(root):
     st.configure("Stats.TLabel", font=(family, 10), foreground=pal["muted"])
     st.configure("Card.TLabelframe.Label", font=(family, 10, "bold"))
     st.configure("PillIdle.TLabel", background=pal["idle"], foreground=pal["idle_text"],
-                 padding=(10, 3), font=(family, 9, "bold"))
+                 padding=(px(10), px(3)), font=(family, 9, "bold"))
     st.configure("PillRec.TLabel", background=pal["rec"], foreground=pal["rec_text"],
-                 padding=(10, 3), font=(family, 9, "bold"))
+                 padding=(px(10), px(3)), font=(family, 9, "bold"))
     st.configure("PillBusy.TLabel", background=pal["accent"], foreground="#1c1c1c",
-                 padding=(10, 3), font=(family, 9, "bold"))
+                 padding=(px(10), px(3)), font=(family, 9, "bold"))
     st.configure("Banner.TFrame", background=pal["banner"])
     st.configure("Banner.TLabel", background=pal["banner"], foreground=pal["banner_text"])
-    st.configure("Status.TLabel", foreground=pal["muted"], padding=(12, 4))
-    st.configure("Treeview", rowheight=26)
+    st.configure("Status.TLabel", foreground=pal["muted"], padding=(px(12), px(4)))
+    st.configure("Treeview", rowheight=px(26))
     return pal
