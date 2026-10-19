@@ -512,3 +512,31 @@ def test_updater_apply_swaps_exe(fake_github, tmp_path, monkeypatch):
     assert kw["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
     updater.cleanup_after_update()
     assert not (app_dir / "AoWCapture.old.exe").exists()
+
+
+def test_threads_stop_cleanly(tmp_path, monkeypatch):
+    """Regression: a thread attribute named _stop broke Thread.join() on Python 3.12."""
+    import socket as _socket
+    from aowcap import loopcap
+    from aowcap.gameproc import FlowTracker
+
+    class DummySock:
+        def recv(self, n):
+            raise _socket.timeout()
+
+        def ioctl(self, *a):
+            pass
+
+        def close(self):
+            pass
+    sn = loopcap.LoopbackSniffer(str(tmp_path / "lo.pcapng"), None, log=lambda m: None)
+    monkeypatch.setattr(sn, "_open", lambda: DummySock())
+    monkeypatch.setattr(loopcap, "tunnel_listen_ports", lambda: {})
+    assert sn.start_capture()
+    sn.stop()
+    assert not sn.is_alive()
+    ft = FlowTracker(type("W", (), {"pids": set()})(), FlowSet(), interval=0.01)
+    ft.start()
+    ft.stop()
+    ft.join(timeout=2)
+    assert not ft.is_alive()

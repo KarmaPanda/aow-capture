@@ -29,7 +29,7 @@ class LoopbackSniffer(threading.Thread):
         self.ports = {}          # port -> app label
         self.packets = 0
         self.error = None
-        self._stop = threading.Event()
+        self._halt = threading.Event()
         self._sock = None
 
     # ------------------------------------------------ ports
@@ -73,7 +73,7 @@ class LoopbackSniffer(threading.Thread):
         return True
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         if self.is_alive():
             self.join(timeout=3)
 
@@ -82,7 +82,7 @@ class LoopbackSniffer(threading.Thread):
         with open(self.path, "wb") as out:
             out.write(shb_block("aow-capture loopback"))
             out.write(idb_block(LINK_RAW, 65535, None))  # microsecond timestamps
-            while not self._stop.is_set():
+            while not self._halt.is_set():
                 now = time.time()
                 if now - last >= self.refresh:
                     try:

@@ -161,10 +161,10 @@ class FlowTracker(threading.Thread):
         self.ignore_ports = {int(p) for p in ignore_ports}
         self.on_new = on_new
         self.interval = interval
-        self._stop = threading.Event()
+        self._halt = threading.Event()
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
 
     def poll_once(self):
         if psutil is None:
@@ -195,12 +195,12 @@ class FlowTracker(threading.Thread):
                     self.on_new(key)
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 self.poll_once()
             except Exception:  # never let a psutil hiccup kill the capture
                 pass
-            self._stop.wait(self.interval)
+            self._halt.wait(self.interval)
 
 
 TUNNEL_APPS = {"exitlag": "ExitLag", "noping": "NoPing", "wtfast": "WTFast", "gearup": "GearUP",
