@@ -245,7 +245,8 @@ class Recorder:
             progress("Keeping only game traffic…")
         part_no = self.part + 1
         multipart = self.part > 0 or not final
-        base = f"official_{self.session_id}_{safe_name(self.cfg.get('tester_name'))}"
+        name = self.cfg.capture_name if hasattr(self.cfg, "capture_name") else ""
+        base = f"official_{self.session_id}" + (f"_{safe_name(name)}" if name else "")
         if multipart:
             base += f"_part{part_no:02d}"
         filtered = os.path.join(self.workdir, base + ".pcapng")
@@ -271,7 +272,7 @@ class Recorder:
         markers = self.markers[self.marker_idx:cut_idx]   # markers added since the last part
         manifest = {
             "tool": APP_NAME, "tool_version": VERSION,
-            "tester": self.cfg.get("tester_name", ""),
+            "tester": name,
             "note": (note or "").strip()[:4000],
             "session_id": self.session_id,
             "part": part_no if multipart else None,

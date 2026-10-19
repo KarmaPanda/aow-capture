@@ -6,7 +6,8 @@ import os
 import sys
 
 DEFAULTS = {
-    # Who is recording (shown in file names and on the receiver).
+    # Who is recording: filled in from the upload server's answer for the invite code, and
+    # only used in file names / manifests when there is an invite code.
     "tester_name": "",
     # Upload target, normally filled in from an invite code.
     "upload_url": "",
@@ -120,6 +121,12 @@ class Config(dict):
     @property
     def can_upload(self):
         return bool(self.get("upload_url") and self.get("upload_token"))
+
+    @property
+    def capture_name(self):
+        """The player's name for file names and manifests: only with an invite code
+        (the name comes from the upload server); "" otherwise."""
+        return (self.get("tester_name") or "").strip() if self.can_upload else ""
 
     def apply_invite(self, code):
         info = parse_invite(code)

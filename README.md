@@ -53,7 +53,7 @@ build.bat                             # local exe in dist/
 |---|---|
 | `client/aowcap/` | the app: `app.py` window, `theme.py` look and icon, `recorder.py`, `pktmon.py` (Windows Packet Monitor), `loopcap.py` (ExitLag relay), `pcapng_filter.py` (keep official traffic, anonymize), `gameproc.py` (find the game, which server it's on), `uploader.py`, `updater.py`, `tray.py`, `diagnose.py` |
 | `client/defaults.json` | starting settings shipped next to the exe |
-| `receiver/` | the upload receiver and server-side decoder (`aow_capture_receiver.py`, `decode_upload.py`) |
+| `tests/` | tests; `fake_receiver.py` stands in for the upload server |
 | `assets/aowcapture.ico` | app icon |
 | `build.py` / `build.bat` | PyInstaller build + zip + checksums |
 
@@ -62,6 +62,10 @@ Command-line options: `--tray`, `--cli`, `--diagnose`, `--invite CODE`, `--uploa
 
 ## Receiver
 
-`receiver/aow_capture_receiver.py` (standard library only) accepts uploads with per-player
-invite codes and decodes each one with `decode_upload.py`. Server setup scripts for the
-project's own server are kept outside this repo.
+The upload receiver and server-side decoder live in a separate private repo
+(`aow-capture-backend`). The client only needs its upload API: `GET /api/v1/ping` (who the
+invite code belongs to), `POST /api/v1/uploads` and resumable `PUT /api/v1/uploads/<id>`
+chunks (see `tests/fake_receiver.py`).
+
+Captures are named `official_<date>_<time>.zip`; with an invite code the player's name, as
+the receiver knows it, is added (`official_<date>_<time>_<name>.zip`).

@@ -10,14 +10,14 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "client"))
-sys.path.insert(0, os.path.join(ROOT, "receiver"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from aowcap import pcapng_filter as pf  # noqa: E402
 from aowcap.config import Config, make_invite, parse_invite  # noqa: E402
 from aowcap.gameproc import FlowSet  # noqa: E402
 from aowcap.recorder import Recorder  # noqa: E402
 from aowcap.uploader import Client, read_state  # noqa: E402
-import aow_capture_receiver as rx  # noqa: E402
+from fake_receiver import FakeReceiver  # noqa: E402
 
 LOCAL = "192.168.1.50"
 SERVER = "148.153.10.20"
@@ -122,7 +122,6 @@ def test_no_anonymize_keeps_bytes(tmp_path):
 def test_invite_roundtrip():
     code = make_invite("https://x.example", "tok", "Bob")
     assert parse_invite(code) == {"url": "https://x.example", "token": "tok", "tester": "Bob"}
-    assert rx.make_invite("https://x.example", "tok", "Bob") == code
     with pytest.raises(ValueError):
         parse_invite("hello")
 
@@ -166,10 +165,13 @@ class FakeWatcher:
         return {"exe": "fxgame.exe", "version": "1.0.0.401"}
 
 
-def test_recorder_end_to_end(tmp_path, monkeypatch):
+@pytest.mark.parametrize("invite", [True, False])
+def test_recorder_end_to_end(tmp_path, monkeypatch, invite):
     raw = sample(tmp_path)
     cfg = Config(path=str(tmp_path / "cfg.json"))
     cfg.update(capture_dir=str(tmp_path / "caps"), tester_name="Bob Smith", known_ports=[])
+    if invite:  # the name only goes on captures that have somewhere to go
+        cfg.update(upload_url="https://example.invalid", upload_token="t")
     sessions = []
 
     def factory(*a, **k):
@@ -182,10 +184,16 @@ def test_recorder_end_to_end(tmp_path, monkeypatch):
     rec.flows.add(6, LOCAL, 50001, "::ffff:" + SERVER, 2003)
     rec.add_marker("opened cultivation")
     path = rec.stop("note here")
-    assert os.path.basename(path).startswith("official_") and path.endswith("_Bob_Smith.zip")
+    base = os.path.basename(path)
+    assert base.startswith("official_")
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
         man = json.loads(z.read("manifest.json"))
+    if invite:
+        assert base.endswith("_Bob_Smith.zip") and man["tester"] == "Bob Smith"
+    else:
+        assert "Bob" not in base and man["tester"] == ""
+        assert base == f"official_{rec.session_id}.zip"
     assert any(n.endswith(".pcapng") for n in names)
     assert man["note"] == "note here" and man["markers"][0]["text"] == "opened cultivation"
     assert man["server_endpoints"][0]["ip"] == SERVER and man["warning"] is None
@@ -209,18 +217,13 @@ def test_recorder_warns_on_empty_payload(tmp_path):
 
 
 @pytest.fixture
-def server(tmp_path, monkeypatch):
+def server(monkeypatch):
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("no_proxy", "*")
-    data = tmp_path / "rx"
-    data.mkdir()
-    tokens = rx.Tokens(str(data))
-    store = rx.Store(str(data), 50 * 1024 * 1024)
-    srv = rx.ThreadingHTTPServer(("127.0.0.1", 0), rx.make_handler(tokens, store))
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}", tokens, data
-    srv.shutdown()
+    rx = FakeReceiver().start()
+    yield rx
+    rx.stop()
 
 
 def make_zip(tmp_path, name="official_20261015_003000_Bob.zip", size=9_000_000):
@@ -233,10 +236,10 @@ def make_zip(tmp_path, name="official_20261015_003000_Bob.zip", size=9_000_000):
 
 
 def test_upload_resume_and_extract(server, tmp_path, monkeypatch):
-    url, tokens, data = server
-    token = tokens.create("Bob")
+    rx = server
+    token = rx.create("Bob")
     z = make_zip(tmp_path)
-    client = Client(url, token)
+    client = Client(rx.url, token)
     assert client.ping()["tester"] == "Bob"
 
     # Simulate a dropped connection after the first chunk, then resume.
@@ -254,53 +257,25 @@ def test_upload_resume_and_extract(server, tmp_path, monkeypatch):
     monkeypatch.setattr(up.time, "sleep", lambda s: None)
     res = client.upload(str(z))
     assert res["done"] and read_state(str(z))["status"] == "uploaded"
-    stored = data / "inbox" / "Bob" / z.name
-    assert stored.read_bytes() == z.read_bytes()
-    out = data / "inbox" / "Bob" / z.name[:-4]
-    assert (out / "manifest.json").exists() and (out / (z.name[:-4] + ".pcapng")).exists()
-    assert not (data / "inbox" / "Bob" / "evil.txt").exists() and not (out / "evil.txt").exists()
-    idx = [json.loads(l) for l in (data / "index.jsonl").read_text().splitlines()]
-    assert idx[0]["tester"] == "Bob" and idx[0]["markers"] == 1
+    assert calls["n"] >= 3   # it really was sent in chunks, one of which failed
+    assert rx.files[("Bob", z.name)] == z.read_bytes()
 
     # Re-uploading the same file is a no-op.
     os.remove(str(z) + ".upload.json")
     assert client.upload(str(z))["done"]
-    assert len((data / "index.jsonl").read_text().splitlines()) == 1
+    assert len(rx.files) == 1
 
 
 def test_bad_token_and_revoke(server, tmp_path):
-    url, tokens, _ = server
+    rx = server
     from aowcap.uploader import UploadError
     with pytest.raises(UploadError):
-        Client(url, "nope").ping()
-    t = tokens.create("Eve")
-    Client(url, t).ping()
-    tokens.revoke("Eve")
+        Client(rx.url, "nope").ping()
+    t = rx.create("Eve")
+    assert Client(rx.url, t).ping()["tester"] == "Eve"
+    rx.revoke("Eve")
     with pytest.raises(UploadError):
-        Client(url, t).ping()
-
-
-@pytest.mark.skipif(not os.environ.get("AOWCAP_TEST_REPO"), reason="set AOWCAP_TEST_REPO to an aow-pserver-development checkout")
-def test_decode_worker_with_repo(tmp_path):
-    repo = os.environ["AOWCAP_TEST_REPO"]
-    d = tmp_path / "inbox" / "Bob" / "official_x_Bob"
-    d.mkdir(parents=True)
-    raw = sample(tmp_path)
-    import shutil
-    shutil.copy(raw, d / "official_x_Bob.pcapng")
-    (d / "manifest.json").write_text(json.dumps({"started_unix": 1.0, "markers": [{"unix": 1.0001, "text": "hi"}]}))
-    (tmp_path / "inbox" / "Bob" / "official_x_Bob.zip").write_bytes(b"x")
-    w = rx.DecodeWorker(repo)
-    w.start()
-    w.backfill(str(tmp_path))
-    import time
-    for _ in range(100):
-        if (d / "decode-status.json").exists():
-            break
-        time.sleep(0.1)
-    st = json.loads((d / "decode-status.json").read_text())
-    assert st["ok"], (d / "decode.log").read_text()
-    assert (d / "decoded" / "summary.json").exists()
+        Client(rx.url, t).ping()
 
 
 def raw_ip(pkt_eth):
@@ -348,34 +323,6 @@ def test_tracker_skips_game_socket_pair():
     finally:
         gameproc.psutil = real
     assert flows.remotes == {(6, "127.0.0.1", 55616)}
-
-
-def test_worker_uses_repo_decoder_and_retries_failed(tmp_path):
-    import time
-    repo = tmp_path / "repo"
-    (repo / "tools").mkdir(parents=True)
-    d = tmp_path / "data" / "inbox" / "Bob" / "official_x_Bob"
-    d.mkdir(parents=True)
-    (d / "official_x_Bob.pcapng").write_bytes(b"")
-    (tmp_path / "data" / "inbox" / "Bob" / "official_x_Bob.zip").write_bytes(b"x")
-    (d / "decode-status.json").write_text(json.dumps({"ok": False}))
-    old = time.time() - 100
-    os.utime(d / "decode-status.json", (old, old))
-    # a decoder in the repo: records that it ran, succeeds
-    (repo / "tools" / "decode_upload.py").write_text(
-        "import sys, pathlib; pathlib.Path(sys.argv[1]).with_name('ran_repo_decoder').write_text('1')\n")
-    w = rx.DecodeWorker(str(repo), data_dir=str(tmp_path / "data"))
-    assert w.decoder.endswith(os.path.join("tools", "decode_upload.py"))
-    w.start()
-    assert w.backfill() == 1
-    assert w.backfill() == 0 or (d / "ran_repo_decoder").exists()  # not queued twice while pending
-    for _ in range(100):
-        st = json.loads((d / "decode-status.json").read_text())
-        if st.get("ok"):
-            break
-        time.sleep(0.05)
-    assert st["ok"] and (d / "ran_repo_decoder").exists()
-    assert w.backfill() == 0  # succeeded: not queued again
 
 
 def test_classify_server():

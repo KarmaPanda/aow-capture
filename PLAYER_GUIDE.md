@@ -20,9 +20,9 @@ Setup (once)
    administrator rights: the recording uses Windows' own Packet Monitor
    (pktmon), which needs them. Nothing else is installed.
    Windows 10 version 2004 (May 2020) or newer is required.
-2. Read and accept the consent message, then enter your name.
+2. Read and accept the consent message.
 3. Click "Invite code…" and paste the code you were sent. The bar should say
-   "Sending to … as <your name>".
+   "Uploading to … as <your name>" (the name comes with your invite code).
 
 Before you play
 ---------------
@@ -77,7 +77,8 @@ Updates
 After recording
 ---------------
 - Saved captures are in Documents\AoW Captures as
-  official_<date>_<time>_<name>.zip.
+  official_<date>_<time>_<name>.zip (without an invite code, just
+  official_<date>_<time>.zip).
 - With "Upload automatically" on, they're sent right away. If the upload
   fails (no internet, PC asleep), it retries and resumes where it stopped,
   including the next time you open the tool.

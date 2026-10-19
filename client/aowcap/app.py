@@ -50,6 +50,7 @@ class App:
     def __init__(self, root, start_hidden=False, just_updated=False):
         self.root = root
         self.pending_update = None
+        self.update_text = None         # "Downloading update … 42%" while one downloads
         self.checkpointing = False
         self.installing_update = False
         self.cfg = Config()
@@ -66,6 +67,9 @@ class App:
         self.told_about_tray = False
         self.tray = traymod.Tray(lambda action: self.events.put(("tray", action)))
 
+        hide_at_start = start_hidden or self.cfg.get("start_in_tray")
+        if hide_at_start and self.cfg.get("consent_given"):
+            root.withdraw()             # no flash of the window before it goes to the tray
         root.title(f"{APP_NAME} {VERSION}")
         self.scale = theme.dpi_scale(root)
         root.minsize(self.px(680), self.px(680))
@@ -79,9 +83,8 @@ class App:
                 return
             self.cfg["consent_given"] = True
             self.cfg.save()
-        if not self.cfg.get("tester_name"):
-            self.ask_name()
         if not pktmon_path():
+            root.deiconify()
             messagebox.showerror(APP_NAME, "Windows Packet Monitor (pktmon) wasn't found.\n"
                                  "Windows 10 version 2004 or newer is required.")
 
@@ -89,12 +92,19 @@ class App:
             self.tray_row.pack(anchor="w", pady=(self.px(4), self.px(0)))
             root.bind("<Unmap>", self._on_unmap)
             traymod.listen_for_show(lambda action: self.events.put(("tray", action)))
-            if start_hidden or self.cfg.get("start_in_tray"):
-                root.after(200, self.hide_window)
+            if hide_at_start:
+                if just_updated:
+                    self.told_about_tray = True  # the "updated" note below is enough
+                self.hide_window()
+        if not self.hidden and root.state() == "withdrawn":
+            root.deiconify()            # no tray after all: show the window
 
         if just_updated:
             self.status.set(f"Updated to {VERSION}.")
-            self.tray.notify(f"{APP_NAME} was updated to {VERSION}.")
+            self.tray.notify(f"{APP_NAME} was updated to {VERSION}"
+                             + (" and is still running in the tray." if self.hidden else "."))
+        if self.cfg.can_upload:
+            threading.Thread(target=self._fetch_name, daemon=True).start()
         threading.Thread(target=self._update_loop, daemon=True).start()
         threading.Thread(target=self._watch_loop, daemon=True).start()
         threading.Thread(target=self._upload_loop, daemon=True).start()
@@ -205,8 +215,7 @@ class App:
         ttk.Button(btns, text="Upload selected", command=self.upload_selected).pack(side="left")
         ttk.Button(btns, text="Open folder", command=self.open_folder).pack(side="left", padx=self.px(6))
         ttk.Button(btns, text="Delete", command=self.delete_selected).pack(side="left")
-        ttk.Button(btns, text="Name…", command=self.ask_name).pack(side="right")
-        ttk.Button(btns, text="Diagnostics…", command=self.diagnostics).pack(side="right", padx=self.px(6))
+        ttk.Button(btns, text="Diagnostics…", command=self.diagnostics).pack(side="right")
 
         # Settings
         sett = ttk.Frame(outer)
@@ -242,19 +251,26 @@ class App:
         self.cfg["start_in_tray"] = self.start_in_tray.get()
         self.cfg.save()
 
-    def ask_name(self):
-        name = simpledialog.askstring(APP_NAME, "Your name or character name (shown with your captures):",
-                                      initialvalue=self.cfg.get("tester_name", ""), parent=self.root)
-        if name and name.strip():
-            self.cfg["tester_name"] = name.strip()[:32]
-            self.cfg.save()
+    def _fetch_name(self):
+        """Ask the upload server who this invite code belongs to; that name goes on the
+        captures. Returns the server's answer (raises UploadError)."""
+        info = Client(self.cfg["upload_url"], self.cfg["upload_token"]).ping()
+        tester = (info.get("tester") or "").strip()[:32]
+        if tester and tester != self.cfg.get("tester_name"):
+            self.events.put(("tester", tester))
+        return info
+
+    def _set_tester(self, name):
+        self.cfg["tester_name"] = name
+        self.cfg.save()
+        self._update_upload_label()
 
     def enter_invite(self):
         code = simpledialog.askstring(APP_NAME, "Paste the invite code you were given:", parent=self.root)
         if not code:
             return
         try:
-            info = self.cfg.apply_invite(code)
+            self.cfg.apply_invite(code)
         except ValueError as e:
             messagebox.showerror(APP_NAME, str(e), parent=self.root)
             return
@@ -263,9 +279,9 @@ class App:
 
         def check():
             try:
-                Client(self.cfg["upload_url"], self.cfg["upload_token"]).ping()
+                info = self._fetch_name()
                 self.events.put(("upload_label", None))
-                self.events.put(("status", f"Connected as {info.get('tester') or self.cfg['tester_name']}."))
+                self.events.put(("status", f"Connected as {info.get('tester') or '?'}."))
                 self.queue_pending_uploads()
             except UploadError as e:
                 self.events.put(("upload_label", f"Can't connect: {e}"))
@@ -276,7 +292,8 @@ class App:
             self.up_var.set(override)
         elif self.cfg.can_upload:
             host = self.cfg["upload_url"].split("://")[-1].split("/")[0]
-            self.up_var.set(f"Uploading to {host} as {self.cfg.get('tester_name') or '?'}")
+            name = self.cfg.capture_name
+            self.up_var.set(f"Uploading to {host}" + (f" as {name}" if name else ""))
         else:
             self.up_var.set("No invite code: saved on this PC only.")
 
@@ -505,6 +522,15 @@ class App:
                     self._tray_action(val)
                 elif kind == "update_ready":
                     self._on_update_ready(val)
+                elif kind == "tester":
+                    self._set_tester(val)
+                elif kind == "update_failed":
+                    if self.update_text:   # a download was under way
+                        self.update_text = None
+                        self.update_bar.pack_forget()
+                        self.status.set(f"The update download failed; trying again later. ({val})")
+                elif kind == "update_progress":
+                    self._on_update_progress(val)
                 elif kind == "part_saved":
                     self._on_part_saved(val)
         except queue.Empty:
@@ -530,7 +556,10 @@ class App:
             self._maybe_auto_update()
         if self.closing:
             return
-        self.tray.update(self.recorder.recording, self.rec_var.get().replace("●", "").strip())
+        tip = self.rec_var.get().replace("●", "").strip()
+        if self.update_text and not self.recorder.recording:
+            tip = self.update_text
+        self.tray.update(self.recorder.recording, tip)
         if not self.closing:
             self.root.after(500, self.tick)
 
@@ -582,24 +611,58 @@ class App:
             try:
                 u = checker.check()
                 if u:
-                    self.events.put(("status", f"Downloading update {u.label}…"))
-                    checker.download(u)
+                    last = [-1]
+
+                    def prog(done, total, u=u):
+                        pct = int(done * 100 / total) if total else -1
+                        key = pct if total else done >> 20   # every 1 % (or MB if size unknown)
+                        if key != last[0]:
+                            last[0] = key
+                            self.events.put(("update_progress", (u, done, total)))
+                    self.events.put(("update_progress", (u, 0, 0)))
+                    checker.download(u, progress=prog)
                     self.events.put(("update_ready", (checker, u)))
                     return
             except upd.UpdateError as e:
                 applog(f"Update check failed: {e}")
+                self.events.put(("update_failed", str(e)))
             except Exception as e:
                 applog(f"Update check error: {e}")
+                self.events.put(("update_failed", str(e)))
             for _ in range(6 * 360):  # every 6 hours
                 if self.closing:
                     return
                 time.sleep(10)
 
+    def _show_update_bar(self, ready):
+        if ready:
+            self.update_btn.pack(side="right")
+        else:
+            self.update_btn.pack_forget()
+        if not self.update_bar.winfo_ismapped():
+            self.update_bar.pack(fill="x", pady=(self.px(0), self.px(10)), before=self.update_bar_anchor)
+
+    def _on_update_progress(self, val):
+        u, done, total = val
+        if self.pending_update:
+            return
+        if total:
+            text = f"Downloading update {u.label}… {done * 100 // total}%"
+        elif done:
+            text = f"Downloading update {u.label}… {fmt_size(done)}"
+        else:
+            text = f"Downloading update {u.label}…"
+        self.update_var.set(text)
+        self.status.set(text)
+        self.update_text = text
+        self._show_update_bar(ready=False)
+
     def _on_update_ready(self, val):
         self.pending_update = val
+        self.update_text = None
         u = val[1]
         self.update_var.set(f"Version {u.label} is ready to install.")
-        self.update_bar.pack(fill="x", pady=(self.px(0), self.px(10)), before=self.update_bar_anchor)
+        self._show_update_bar(ready=True)
         self.status.set(f"Update {u.label} downloaded.")
         if self.hidden:
             self.tray.notify(f"Update {u.label} downloaded. It installs when you're not playing.")

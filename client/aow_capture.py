@@ -99,7 +99,15 @@ def main():
     if args.invite:
         info = cfg.apply_invite(args.invite)
         cfg.save()
-        print(f"Invite stored: {info['url']} as {cfg.get('tester_name')}")
+        try:
+            from aowcap.uploader import Client
+            tester = Client(cfg["upload_url"], cfg["upload_token"]).ping().get("tester")
+            if tester:
+                cfg["tester_name"] = tester
+                cfg.save()
+        except Exception as e:
+            print(f"Couldn't reach the upload server yet: {e}")
+        print(f"Invite stored: {info['url']} as {cfg.get('tester_name') or '?'}")
     if args.cleanup:
         from aowcap.pktmon import cleanup
         cleanup()
@@ -107,9 +115,6 @@ def main():
     if args.upload_pending:
         return upload_pending(cfg)
     if args.cli:
-        if not cfg.get("tester_name"):
-            cfg["tester_name"] = input("Your name: ").strip()[:32]
-            cfg.save()
         cli_record(cfg)
     return 0
 

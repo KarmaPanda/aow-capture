@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.2
+
+- **Stays in the tray after updating.** If it was hidden in the tray when an update
+  installed, the new version starts straight in the tray (no window) and just shows a
+  "updated" notification.
+- **Shows update download progress:** "Downloading update 0.2.x… 42%" in a banner at the
+  top, the status bar and the tray tooltip.
+- **No name prompt.** Your name now comes with your invite code: the tool asks the upload
+  server who the code belongs to. Captures are named `official_<date>_<time>.zip`, plus
+  `_<name>` only when you have an invite code. The "Name…" button is gone.
+
 ## v0.2.1
 
 - **Sharp on high-DPI displays.** The window is now DPI-aware: at 125/150/200 % scaling
