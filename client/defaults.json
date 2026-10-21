@@ -1,0 +1,12 @@
+{
+  "upload_url": "",
+  "known_ports": [2002, 2003, 2004, 4000],
+  "server_ports": [],
+  "ignore_ports": [80, 443, 8080],
+  "game_modules": ["fxnet2.dll"],
+  "process_names": ["fxgame.exe"],
+  "auto_record": true,
+  "auto_upload": true,
+  "anonymize_local": true,
+  "raw_limit_mb": 4096
+}
