@@ -121,3 +121,19 @@ class Client:
                                 stored=data.get("stored"))
                     return data
         raise UploadError("The server didn't confirm the finished upload.")
+
+
+def new_upload_url(current, token, info, client_cls=None):
+    """The upload server's answer to ping may name a new public address ("upload_url").
+    Returns that address once it's confirmed to work with the same invite (and to belong
+    to the same player), else None. Only https addresses are accepted."""
+    new = (info.get("upload_url") or "").strip().rstrip("/")
+    if not new or new == (current or "").rstrip("/") or not new.lower().startswith("https://"):
+        return None
+    try:
+        there = (client_cls or Client)(new, token, timeout=20).ping()
+    except UploadError:
+        return None
+    if there.get("tester") != info.get("tester"):
+        return None
+    return new

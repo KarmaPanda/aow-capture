@@ -61,6 +61,16 @@ def upload_pending(cfg):
         print("No invite code stored.")
         return 1
     client = Client(cfg["upload_url"], cfg["upload_token"])
+    try:  # follow the upload server if it has moved
+        from aowcap.uploader import new_upload_url
+        moved = new_upload_url(cfg["upload_url"], cfg["upload_token"], client.ping())
+        if moved:
+            print(f"Upload server moved to {moved}")
+            cfg["upload_url"] = moved
+            cfg.save()
+            client = Client(moved, cfg["upload_token"])
+    except UploadError:
+        pass
     d = cfg["capture_dir"]
     for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
         path = os.path.join(d, name)

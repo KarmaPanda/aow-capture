@@ -83,7 +83,7 @@ a per-player token, sent as `Authorization: Bearer <token>`:
 
 | | |
 |---|---|
-| `GET /api/v1/ping` | `{"ok", "tester", "max_bytes"}`; captures are named after `tester` |
+| `GET /api/v1/ping` | `{"ok", "tester", "max_bytes", "upload_url"?}`; captures are named after `tester`. If `upload_url` (https) differs from the address in use and the invite works there for the same player, the tool switches to it, so the server's address can change without new invite codes |
 | `POST /api/v1/uploads` `{filename, size, sha256}` | `{"id", "offset", "done"}`; a file already received answers `done` |
 | `PUT /api/v1/uploads/<id>?offset=N` | one chunk (4 MB); `409 {"offset"}` means resume from there |
 

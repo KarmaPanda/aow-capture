@@ -17,7 +17,7 @@ from .recorder import Recorder
 from . import tray as traymod
 from . import theme
 from . import updater as upd
-from .uploader import Client, UploadError, read_state
+from .uploader import Client, UploadError, new_upload_url, read_state
 
 CONSENT = (
     "AoW Capture records the network traffic between Age of Wushu and the official "
@@ -104,7 +104,7 @@ class App:
             self.tray.notify(f"{APP_NAME} was updated to {VERSION}"
                              + (" and is still running in the tray." if self.hidden else "."))
         if self.cfg.can_upload:
-            threading.Thread(target=self._fetch_name, daemon=True).start()
+            threading.Thread(target=self._check_in, daemon=True).start()
         threading.Thread(target=self._update_loop, daemon=True).start()
         threading.Thread(target=self._watch_loop, daemon=True).start()
         threading.Thread(target=self._upload_loop, daemon=True).start()
@@ -254,11 +254,31 @@ class App:
     def _fetch_name(self):
         """Ask the upload server who this invite code belongs to; that name goes on the
         captures. Returns the server's answer (raises UploadError)."""
-        info = Client(self.cfg["upload_url"], self.cfg["upload_token"]).ping()
+        url, token = self.cfg["upload_url"], self.cfg["upload_token"]
+        info = Client(url, token).ping()
+        moved = new_upload_url(url, token, info)
+        if moved:   # the upload server has a new address: use it from now on
+            self.events.put(("upload_url", (url, moved)))
         tester = (info.get("tester") or "").strip()[:32]
         if tester and tester != self.cfg.get("tester_name"):
             self.events.put(("tester", tester))
         return info
+
+    def _check_in(self):
+        try:
+            self._fetch_name()
+        except UploadError as e:
+            applog(f"Upload server not reachable at start: {e}")
+
+    def _set_upload_url(self, val):
+        old, new = val
+        if self.cfg.get("upload_url", "").rstrip("/") != old.rstrip("/"):
+            return   # the invite changed meanwhile
+        self.cfg["upload_url"] = new
+        self.cfg.save()
+        applog(f"Upload server moved: {old} -> {new}")
+        self.status.set(f"The upload server moved to {new.split('://')[-1]}; using it from now on.")
+        self._update_upload_label()
 
     def _set_tester(self, name):
         self.cfg["tester_name"] = name
@@ -524,6 +544,8 @@ class App:
                     self._on_update_ready(val)
                 elif kind == "tester":
                     self._set_tester(val)
+                elif kind == "upload_url":
+                    self._set_upload_url(val)
                 elif kind == "update_failed":
                     if self.update_text:   # a download was under way
                         self.update_text = None

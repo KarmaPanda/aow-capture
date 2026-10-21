@@ -546,3 +546,32 @@ def test_single_save_has_no_part_suffix(tmp_path):
     rec.start()
     rec.flows.add(6, LOCAL, 50001, SERVER, 2003)
     assert "_part" not in os.path.basename(rec.stop())
+
+
+def test_follows_upload_server_to_new_address(monkeypatch):
+    from aowcap.uploader import new_upload_url
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+    new_rx = FakeReceiver().start()
+    old_rx = FakeReceiver(public_url="https://new.example").start()
+    try:
+        token = old_rx.create("Bob")
+        new_rx.tokens[token] = "Bob"           # same receiver behind both names
+
+        class Routed(Client):                  # https://new.example -> the second fake
+            def __init__(self, url, token, timeout=60):
+                super().__init__(new_rx.url if url == "https://new.example" else url, token, timeout)
+        info = Client(old_rx.url, token).ping()
+        assert info["upload_url"] == "https://new.example"
+        assert new_upload_url(old_rx.url, token, info, Routed) == "https://new.example"
+        # nothing to do when it's the same address or none is announced
+        assert new_upload_url("https://new.example/", token, info, Routed) is None
+        assert new_upload_url(old_rx.url, token, {"tester": "Bob"}, Routed) is None
+        # never moves to an address where the invite doesn't work or that isn't https
+        new_rx.revoke("Bob")
+        assert new_upload_url(old_rx.url, token, info, Routed) is None
+        assert new_upload_url(old_rx.url, token, dict(info, upload_url="http://x.example"), Routed) is None
+    finally:
+        old_rx.stop()
+        new_rx.stop()

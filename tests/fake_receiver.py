@@ -1,6 +1,6 @@
 """A small stand-in for an upload server: just the upload protocol the client speaks.
 
-GET  /api/v1/ping                      -> {"ok", "tester", "max_bytes"}
+GET  /api/v1/ping                      -> {"ok", "tester", "max_bytes"[, "upload_url"]}
 POST /api/v1/uploads {filename,size,sha256} -> {"id", "offset", "done"}
 PUT  /api/v1/uploads/<id>?offset=N     -> {"offset", "done"} | 409 {"offset"}
 """
@@ -14,7 +14,8 @@ from urllib.parse import parse_qs, urlparse
 
 
 class FakeReceiver:
-    def __init__(self, max_bytes=50 * 1024 * 1024):
+    def __init__(self, max_bytes=50 * 1024 * 1024, public_url=None):
+        self.public_url = public_url    # announced in ping: clients move there
         self.tokens = {}         # token -> tester
         self.revoked = set()
         self.partial = {}        # (tester, id) -> {"meta":…, "data": bytearray}
@@ -69,7 +70,10 @@ class FakeReceiver:
                     return self._json(404, {"error": "not found"})
                 tester = self._auth()
                 if tester:
-                    self._json(200, {"ok": True, "tester": tester, "max_bytes": rx.max_bytes})
+                    info = {"ok": True, "tester": tester, "max_bytes": rx.max_bytes}
+                    if rx.public_url:
+                        info["upload_url"] = rx.public_url
+                    self._json(200, info)
 
             def do_POST(self):
                 tester = self._auth()

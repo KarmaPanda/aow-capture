@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.4
+
+- **Follows the upload server when its address changes.** When the tool checks in with
+  the upload server and the server names a new address, the tool checks that your invite
+  code works there and switches to it. No new invite code needed.
+
 ## v0.2.3
 
 - Clearer wording in the consent message and status lines: recordings are for whoever
