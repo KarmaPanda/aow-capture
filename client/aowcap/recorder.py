@@ -291,6 +291,10 @@ class Recorder:
                                    for p in sorted(relay_ports)
                                    if not any(e["ip"] == "127.0.0.1" and e["port"] == p
                                               for e in flows.to_manifest())],
+            # Which game client (window / process) made which connection: lets the decoder
+            # label each stream when several clients were recorded together.
+            "clients": flows.clients_manifest(
+                keep=lambda p, ip, port: (p, ip, port) in remotes or (ip == "127.0.0.1" and port in relay_ports)),
             "server_ports_filter": sorted(keep_ports),
             "game_server": self.servers_seen.get("official"),
             "official_networks": self.cfg.get("official_networks"),

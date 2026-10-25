@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.5
+
+- **Several game clients at once:** each recording now notes which game client (window)
+  made which connection (`clients` in manifest.json: process id, window titles, and each
+  connection's local port, server and when it was seen), so every client's traffic can be
+  told apart when several are recorded together.
+
 ## v0.2.4
 
 - **Follows the upload server when its address changes.** When the tool checks in with

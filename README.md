@@ -35,7 +35,10 @@ Each recording is a zip, `official_<date>_<time>.zip` (with an invite code,
 
 - a `.pcapng` with only the game's packets (opens in Wireshark),
 - `manifest.json`: tool and game version, start/end, server endpoints, markers, note,
-  part number for long sessions.
+  part number for long sessions, and `clients`: every game client (window) that was open,
+  with its process id, window titles and the connections it made. With several clients
+  open at once, that tells you which client each connection in the `.pcapng` belongs to
+  (match its local port and server address).
 
 The capture does contain what the game itself sends and receives, including your
 character, chat and the login exchange, so only share recordings with people you trust.

@@ -32,23 +32,67 @@ def norm_ip(ip):
 
 
 class FlowSet:
-    """The game's connections seen during a capture."""
+    """The game's connections seen during a capture, and which game client (window) made
+    each one, so several clients recorded together can be told apart afterwards."""
 
     def __init__(self):
         self.remotes = set()       # (proto, remote_ip, remote_port)
         self.local_ips = set()
         self.first_seen = {}       # (proto, rip, rport) -> unix time
+        self.conns = {}            # (proto, local_port, rip, rport) -> {pid, first_seen, last_seen}
+        self.clients = {}          # pid -> {"id": "clientN", exe, created, titles, first/last_seen}
         self.lock = threading.Lock()
 
-    def add(self, proto, lip, lport, rip, rport):
+    def add(self, proto, lip, lport, rip, rport, pid=None):
         key = (proto, norm_ip(rip), int(rport))
+        now = time.time()
         with self.lock:
             if key not in self.remotes:
                 self.remotes.add(key)
-                self.first_seen[key] = time.time()
+                self.first_seen[key] = now
             if lip:
                 self.local_ips.add(norm_ip(lip))
+            if pid is not None and lport:
+                ck = (proto, int(lport), key[1], key[2])
+                c = self.conns.get(ck)
+                if c is None or c["pid"] != pid:   # a reused local port belongs to the newer client
+                    self.conns[ck] = {"pid": pid, "first_seen": now, "last_seen": now}
+                else:
+                    c["last_seen"] = now
             return key
+
+    def note_client(self, pid, exe=None, created=None, titles=()):
+        """Remember a game client (one per process / window) and its window titles."""
+        now = time.time()
+        with self.lock:
+            c = self.clients.get(pid)
+            if c is None:
+                c = self.clients[pid] = {"id": f"client{len(self.clients) + 1}", "pid": pid,
+                                         "exe": exe, "created": created, "titles": [],
+                                         "first_seen": now, "last_seen": now}
+            c["last_seen"] = now
+            for t in titles:
+                t = (t or "").strip()
+                if t and t not in c["titles"]:
+                    c["titles"].append(t[:200])
+
+    def clients_manifest(self, keep=None):
+        """[{id, pid, exe, created, window_titles, first_seen, last_seen, connections}] for the
+        manifest. keep(proto, rip, rport) limits connections to the ones kept in the file."""
+        with self.lock:
+            out = []
+            for c in sorted(self.clients.values(), key=lambda c: c["first_seen"]):
+                conns = [{"proto": "tcp" if p == TCP else "udp", "local_port": lp, "ip": ip,
+                          "port": port, "first_seen": round(v["first_seen"], 3),
+                          "last_seen": round(v["last_seen"], 3)}
+                         for (p, lp, ip, port), v in sorted(self.conns.items())
+                         if v["pid"] == c["pid"] and (keep is None or keep(p, ip, port))]
+                out.append({"id": c["id"], "pid": c["pid"], "exe": c["exe"],
+                            "created": round(c["created"], 3) if c["created"] else None,
+                            "window_titles": list(c["titles"]),
+                            "first_seen": round(c["first_seen"], 3),
+                            "last_seen": round(c["last_seen"], 3), "connections": conns})
+            return out
 
     def snapshot(self):
         with self.lock:
@@ -154,8 +198,11 @@ class GameWatcher:
 class FlowTracker(threading.Thread):
     """Every 250 ms, records the game processes' connections into a FlowSet."""
 
+    TITLE_EVERY = 2.0   # seconds between window-title reads per client
+
     def __init__(self, watcher, flows, ignore_ports=(), on_new=None, interval=0.25):
         super().__init__(daemon=True, name="flow-tracker")
+        self._titles_at = {}  # pid -> last time its window titles were read
         self.watcher = watcher
         self.flows = flows
         self.ignore_ports = {int(p) for p in ignore_ports}
@@ -170,11 +217,23 @@ class FlowTracker(threading.Thread):
         if psutil is None:
             return
         per_pid = {}
+        now = time.time()
         for pid in list(self.watcher.pids):
             try:
-                per_pid[pid] = _connections(psutil.Process(pid))
+                proc = psutil.Process(pid)
+                per_pid[pid] = _connections(proc)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
+            titles = ()
+            if now - self._titles_at.get(pid, 0) >= self.TITLE_EVERY:
+                self._titles_at[pid] = now
+                titles = window_titles(pid)
+            created = None
+            try:
+                created = proc.create_time()
+            except Exception:
+                pass
+            self.flows.note_client(pid, getattr(self.watcher, "exe_names", {}).get(pid), created, titles)
         # The game's own local ports: a loopback connection to one of them is the game
         # talking to itself (a socket pair), not a server or a booster's local relay.
         own_ports = {c.laddr.port for conns in per_pid.values() for c in conns if c.laddr}
@@ -190,7 +249,7 @@ class FlowTracker(threading.Thread):
                 proto = TCP if int(c.type) == 1 else UDP  # socket.SOCK_STREAM == 1
                 before = len(self.flows.remotes)
                 key = self.flows.add(proto, c.laddr.ip if c.laddr else None,
-                                     c.laddr.port if c.laddr else 0, c.raddr.ip, rport)
+                                     c.laddr.port if c.laddr else 0, c.raddr.ip, rport, pid=pid)
                 if self.on_new and len(self.flows.remotes) > before:
                     self.on_new(key)
 

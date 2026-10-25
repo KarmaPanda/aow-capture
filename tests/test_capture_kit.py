@@ -181,7 +181,9 @@ def test_recorder_end_to_end(tmp_path, monkeypatch, invite):
         return s
     rec = Recorder(cfg, FakeWatcher(), log=lambda m: None, session_factory=factory)
     rec.start("test")
-    rec.flows.add(6, LOCAL, 50001, "::ffff:" + SERVER, 2003)
+    rec.flows.note_client(4321, "fxgame.exe", 1.0, ["Age of Wushu   Launch-BlueDragon"])
+    rec.flows.add(6, LOCAL, 50001, "::ffff:" + SERVER, 2003, pid=4321)
+    rec.flows.add(6, LOCAL, 50009, OTHER, 443, pid=4321)          # not game traffic: not listed
     rec.add_marker("opened cultivation")
     path = rec.stop("note here")
     base = os.path.basename(path)
@@ -197,6 +199,9 @@ def test_recorder_end_to_end(tmp_path, monkeypatch, invite):
     assert any(n.endswith(".pcapng") for n in names)
     assert man["note"] == "note here" and man["markers"][0]["text"] == "opened cultivation"
     assert man["server_endpoints"][0]["ip"] == SERVER and man["warning"] is None
+    (client,) = man["clients"]
+    assert client["id"] == "client1" and client["pid"] == 4321
+    assert [(c["local_port"], c["ip"], c["port"]) for c in client["connections"]] == [(50001, SERVER, 2003)]
 
 
 def test_recorder_warns_on_empty_payload(tmp_path):
@@ -575,3 +580,45 @@ def test_follows_upload_server_to_new_address(monkeypatch):
     finally:
         old_rx.stop()
         new_rx.stop()
+
+
+def test_tracker_notes_which_client_made_each_connection(monkeypatch):
+    """Two game clients on the same server: each connection is credited to its own client."""
+    from aowcap import gameproc
+    from types import SimpleNamespace as NS
+    A = lambda ip, port: NS(ip=ip, port=port)
+    per_pid = {11: [NS(laddr=A(LOCAL, 50001), raddr=A(SERVER, 2003), type=1)],
+               22: [NS(laddr=A(LOCAL, 50002), raddr=A(SERVER, 2003), type=1),
+                    NS(laddr=A(LOCAL, 50003), raddr=A(OTHER, 443), type=1)]}
+
+    class P:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def net_connections(self, kind):
+            return per_pid[self.pid]
+
+        def create_time(self):
+            return 1000.0 + self.pid
+    monkeypatch.setattr(gameproc, "psutil", NS(Process=P, NoSuchProcess=Exception, AccessDenied=Exception))
+    monkeypatch.setattr(gameproc, "window_titles", lambda pid: [f"Age of Wushu   Launch-BlueDragon #{pid}"])
+    flows = FlowSet()
+    tr = gameproc.FlowTracker(NS(pids={11, 22}, exe_names={11: "fxgame.exe", 22: "fxgame.exe"}), flows)
+    tr.poll_once()
+    tr.poll_once()
+    clients = {c["pid"]: c for c in flows.clients_manifest(keep=lambda p, ip, port: ip == SERVER)}
+    assert {c["id"] for c in clients.values()} == {"client1", "client2"}
+    assert [(x["local_port"], x["ip"], x["port"]) for x in clients[11]["connections"]] == [(50001, SERVER, 2003)]
+    assert [(x["local_port"], x["ip"], x["port"]) for x in clients[22]["connections"]] == [(50002, SERVER, 2003)]
+    assert clients[22]["window_titles"] == ["Age of Wushu   Launch-BlueDragon #22"]
+    assert clients[11]["created"] == 1011.0 and clients[11]["exe"] == "fxgame.exe"
+
+
+def test_reused_local_port_goes_to_newer_client():
+    flows = FlowSet()
+    flows.note_client(1)
+    flows.note_client(2)
+    flows.add(6, LOCAL, 50001, SERVER, 2003, pid=1)
+    flows.add(6, LOCAL, 50001, SERVER, 2003, pid=2)   # client 1 closed, port reused by client 2
+    c = {x["pid"]: x["connections"] for x in flows.clients_manifest()}
+    assert c[1] == [] and len(c[2]) == 1
