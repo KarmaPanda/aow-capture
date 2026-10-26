@@ -127,7 +127,8 @@ def test_invite_roundtrip():
 
 
 class FakeSession:
-    def __init__(self, workdir, ports, limit, log=print, all_components=False):
+    def __init__(self, workdir, ports, limit, log=print, all_components=False, nets=()):
+        self.nets = nets
         self.workdir, self.nics_only = workdir, True
         self.src = None
         self.etl = "raw0.etl"
@@ -744,3 +745,78 @@ def test_summarize_clients():
     assert summarize_clients({1: ("private", "a"), 2: ("official", "b")}) == ("official", "b")
     assert summarize_clients({1: ("private", "a"), 2: (None, None)}) == ("private", "a")
     assert summarize_clients({}) == (None, None)
+
+
+def test_pktmon_records_only_official_range(tmp_path, monkeypatch):
+    from aowcap import pktmon
+    calls = []
+
+    def fake_run(args, check=True, timeout=300):
+        calls.append(list(args))
+        return ""
+    monkeypatch.setattr(pktmon, "_run", fake_run)
+    monkeypatch.setattr(pktmon, "cleanup", lambda: None)
+    s = pktmon.PktmonSession(str(tmp_path), (), 64, log=lambda m: None, nets=["148.153.0.0/16"])
+    s.start()
+    assert ["filter", "add", "AOWCAPNET0", "-i", "148.153.0.0/16"] in calls
+    assert any(c[0] == "start" and "--file-size" in c for c in calls)
+
+
+def test_pktmon_falls_back_when_address_filter_fails(tmp_path, monkeypatch):
+    from aowcap import pktmon
+    calls, logs = [], []
+
+    def fake_run(args, check=True, timeout=300):
+        calls.append(list(args))
+        if "-i" in args:
+            raise pktmon.PktmonError("bad parameter")
+        return ""
+    monkeypatch.setattr(pktmon, "_run", fake_run)
+    monkeypatch.setattr(pktmon, "cleanup", lambda: None)
+    s = pktmon.PktmonSession(str(tmp_path), (2003,), 64, log=logs.append, nets=["148.153.0.0/16"])
+    s.start()
+    assert ["filter", "remove"] in calls
+    assert calls.count(["filter", "add", "AOWCAP0", "-p", "2003"]) == 2   # port filter put back
+    assert any(c[0] == "start" for c in calls) and any("recording all traffic" in m for m in logs)
+
+
+def test_recorder_passes_official_range_to_pktmon(tmp_path):
+    cfg = Config(path=str(tmp_path / "cfg.json"))
+    cfg.update(capture_dir=str(tmp_path / "caps"))
+    made = []
+
+    def factory(*a, **k):
+        s = FakeSession(*a, **k)
+        made.append(s)
+        return s
+    rec = Recorder(cfg, FakeWatcher(), log=lambda m: None, session_factory=factory, sniffer_factory=None)
+    rec.start()
+    rec.abort()
+    assert made[0].nets == ["148.153.0.0/16"]
+    cfg["prefilter_networks"] = False
+    rec.start()
+    rec.abort()
+    assert not made[1].nets
+
+
+@pytest.mark.parametrize("autosave,raw_mb,since,expect", [
+    (True, 10, 700, True),      # timer
+    (True, 10, 10, False),      # nothing due
+    (False, 10, 700, False),    # timer off
+    (False, 80, 10, True),      # raw file 80 % full: save even with the timer off
+    (True, 80, 10, True),
+])
+def test_autosave_also_when_raw_file_fills(monkeypatch, autosave, raw_mb, since, expect):
+    pytest.importorskip("tkinter")
+    from types import SimpleNamespace as NS
+    from aowcap import app as A
+    saved = []
+    rec = NS(raw_size=lambda: raw_mb * 1024 * 1024, since_cut=lambda: since,
+             checkpoint=lambda: saved.append(1))
+    me = NS(busy=False, checkpointing=False, autosave=NS(get=lambda: autosave), recorder=rec,
+            cfg={"raw_limit_mb": 100, "autosave_minutes": 10}, events=NS(put=lambda e: None),
+            RAW_SAVE_AT=A.App.RAW_SAVE_AT)
+    me._raw_nearly_full = lambda: A.App._raw_nearly_full(me)
+    monkeypatch.setattr(A.threading, "Thread", lambda target, **k: NS(start=target))
+    A.App._maybe_autosave(me)
+    assert bool(saved) == expect and me.checkpointing == expect

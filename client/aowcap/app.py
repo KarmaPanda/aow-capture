@@ -565,9 +565,8 @@ class App:
             self.rec_btn.config(text="■  Stop and save")
             self._set_pill("rec")
             self._maybe_autosave()
-            limit = self.cfg.get("raw_limit_mb", 4096) * 1024 * 1024
-            if self.recorder.raw_size() > 0.85 * limit:
-                self.status.set("Raw capture is nearly full; stop and start a new recording soon.")
+            if self._raw_nearly_full() and not self.checkpointing:
+                self.status.set("Raw capture is getting full: saving a part now.")
         elif self.busy:
             self.rec_var.set("Saving…")
             self.rec_btn.config(text="Saving…")
@@ -695,12 +694,23 @@ class App:
                 and not self.checkpointing and self.uploads.empty())
 
     # ------------------------------------------------------------ auto-save
+    RAW_SAVE_AT = 0.75   # save a part when the raw file is this full
+
+    def _raw_nearly_full(self):
+        limit = int(self.cfg.get("raw_limit_mb", 4096) or 4096) * 1024 * 1024
+        return self.recorder.raw_size() > self.RAW_SAVE_AT * limit
+
     def _maybe_autosave(self):
-        if not self.autosave.get() or self.busy or self.checkpointing:
+        if self.busy or self.checkpointing:
             return
+        # Packet Monitor's raw file is circular: once full it overwrites the oldest packets.
+        # So a part is saved before that, even with the timed auto-save turned off.
+        full = self._raw_nearly_full()
         minutes = max(1, int(self.cfg.get("autosave_minutes", 10) or 10))
-        if self.recorder.since_cut() < minutes * 60:
+        if not full and (not self.autosave.get() or self.recorder.since_cut() < minutes * 60):
             return
+        if full:
+            applog(f"Raw file {fmt_size(self.recorder.raw_size())} is nearly full: saving a part")
         self.checkpointing = True
 
         def work():

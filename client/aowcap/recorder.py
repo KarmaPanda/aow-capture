@@ -93,8 +93,11 @@ class Recorder:
             all_layers = bool(boosters) or bool(self.cfg.get("pktmon_all_components"))
             if boosters:
                 self._log(f"{', '.join(boosters)} running: recording every network layer.")
+            # Packet Monitor records only the official servers' range: the raw file then
+            # holds game traffic only and fills up far slower (the rest is dropped at save).
+            nets = self.cfg.get("official_networks") if self.cfg.get("prefilter_networks", True) else ()
             session = self.session_factory(self.workdir, ports, self.cfg.get("raw_limit_mb", 4096),
-                                           log=self._log, all_components=all_layers)
+                                           log=self._log, all_components=all_layers, nets=nets or ())
             session.start()
             self.session = session
             self.flows = FlowSet()

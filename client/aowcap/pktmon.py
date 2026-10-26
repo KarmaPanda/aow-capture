@@ -51,14 +51,19 @@ class PktmonSession:
     restarts pktmon (a gap of about a second, logged).
     """
 
-    def __init__(self, workdir, ports=(), raw_limit_mb=4096, log=print, all_components=False):
+    def __init__(self, workdir, ports=(), raw_limit_mb=4096, log=print, all_components=False, nets=()):
         """all_components: record at every layer of the network stack, not just the
         network cards. Needed with ExitLag's NDIS mode (and similar drivers), which
         encrypt the game's packets below Windows' TCP/IP: the plain packets only exist
-        above that driver. Duplicates across layers are removed at save."""
+        above that driver. Duplicates across layers are removed at save.
+
+        nets: address ranges (CIDR) to record, e.g. the official servers'. Packet Monitor
+        then only writes packets to or from them, so the raw file stays small; everything
+        else would be dropped at save anyway. Ignored if this Windows can't filter so."""
         self.workdir = workdir
         self.all_components = all_components
         self.ports = [int(p) for p in ports]
+        self.nets = [str(n) for n in nets or ()]
         self.raw_limit_mb = int(raw_limit_mb)
         self.log = log
         self.seq = 0
@@ -73,10 +78,22 @@ class PktmonSession:
         cleanup()  # a crashed earlier run may have left a session or filters behind
         for i, port in enumerate(self.ports):
             _run(["filter", "add", f"AOWCAP{i}", "-p", str(port)])
+        if self.nets:
+            try:
+                for i, net in enumerate(self.nets):
+                    _run(["filter", "add", f"AOWCAPNET{i}", "-i", net])
+                self.log(f"Capture filter: {', '.join(self.nets)}"
+                         + (f" and ports {', '.join(map(str, self.ports))}" if self.ports else ""))
+                return self._start_capture(self.etl)
+            except PktmonError as e:
+                self.log(f"Packet Monitor can't filter by address here ({e}); recording all traffic.")
+                _run(["filter", "remove"], check=False)
+                for i, port in enumerate(self.ports):
+                    _run(["filter", "add", f"AOWCAP{i}", "-p", str(port)])
         if self.ports:
             self.log(f"Capture filter: ports {', '.join(map(str, self.ports))}")
         else:
-            self.log("No server ports configured: recording all traffic, game traffic is filtered out at save.")
+            self.log("No capture filter: recording all traffic, game traffic is filtered out at save.")
         self._start_capture(self.etl)
 
     def _start_capture(self, etl):

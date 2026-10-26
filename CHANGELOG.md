@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.7
+
+- **Much smaller raw recordings.** Packet Monitor now records only the official servers'
+  address range instead of all of the PC's traffic (everything else was thrown away at
+  save anyway). Downloads, streams and other games no longer fill the raw file. If this
+  Windows can't filter by address, it records everything as before.
+- **Never loses the start of a long session.** Packet Monitor's raw file overwrites its
+  oldest packets once full; now, when it reaches 75 % full, a part is saved and uploaded
+  right away (recording continues), even with "Save and upload every 10 min" off.
+
 ## v0.2.6
 
 - **A client on another server no longer stops the recording.** Each game client is

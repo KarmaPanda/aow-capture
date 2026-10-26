@@ -15,6 +15,10 @@ to a server you were given an invite code for.
   game's packets are caught above ExitLag's driver).
 - **Nothing lost on a crash.** While recording, a part is saved (and uploaded) every
   10 minutes without stopping the recording.
+- **Small raw files.** Packet Monitor is told to record only the official servers' address
+  range, so the raw file holds game traffic only. Its raw file is circular (when full it
+  overwrites the oldest packets), so if it still reaches 75 % of `raw_limit_mb` a part is
+  saved right away, even with the 10-minute auto-save off.
 - Markers and notes, tray icon, resumable uploads, and it **updates itself** from this repo's
   releases.
 

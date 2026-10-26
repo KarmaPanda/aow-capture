@@ -20,6 +20,8 @@ DEFAULTS = {
     # Only these count as official game servers. Traffic to anything else (other
     # servers, LAN, local programs) is never saved.
     "official_networks": ["148.153.0.0/16"],
+    # Let Packet Monitor record only official_networks (much smaller raw files).
+    "prefilter_networks": True,
     # Game sessions whose window title / launch args name another server are not recorded.
     # Any "Area-Server" title that names no official server already counts as another
     # server; private_servers lists extra names to treat that way.
