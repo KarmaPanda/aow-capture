@@ -76,12 +76,19 @@ class FlowSet:
                 if t and t not in c["titles"]:
                     c["titles"].append(t[:200])
 
-    def clients_manifest(self, keep=None):
+    def conn_owners(self):
+        """{(proto, local_port, remote_ip, remote_port): pid}"""
+        with self.lock:
+            return {k: v["pid"] for k, v in self.conns.items()}
+
+    def clients_manifest(self, keep=None, exclude=()):
         """[{id, pid, exe, created, window_titles, first_seen, last_seen, connections}] for the
         manifest. keep(proto, rip, rport) limits connections to the ones kept in the file."""
         with self.lock:
             out = []
             for c in sorted(self.clients.values(), key=lambda c: c["first_seen"]):
+                if c["pid"] in exclude:
+                    continue
                 conns = [{"proto": "tcp" if p == TCP else "udp", "local_port": lp, "ip": ip,
                           "port": port, "first_seen": round(v["first_seen"], 3),
                           "last_seen": round(v["last_seen"], 3)}
@@ -172,21 +179,24 @@ class GameWatcher:
             return None
         return ", ".join(f"{self.exe_names.get(p, '?')} (pid {p})" for p in sorted(self.pids))
 
-    def server_identity(self, official_names=("BlueDragon",), private_names=()):
-        """("official"|"private"|None, label) for the running game client(s)."""
-        verdicts = []
+    def client_servers(self, official_names=("BlueDragon",), private_names=()):
+        """{pid: ("official"|"private"|None, label)}: which server each game client is on."""
+        out = {}
         for pid in sorted(self.pids):
             texts = window_titles(pid) + [a for a in process_cmdline(pid)[1:] if "-" in a]
-            verdicts.append(classify_server(texts, official_names, private_names))
-        for kind in ("private", "official"):  # any private client wins
-            for v in verdicts:
-                if v[0] == kind:
-                    return v
-        return None, None
+            out[pid] = classify_server(texts, official_names, private_names)
+        return out
 
-    def exe_version(self):
-        """File version of the game exe, for the manifest (Windows only)."""
-        for pid in self.pids:
+    def server_identity(self, official_names=("BlueDragon",), private_names=()):
+        """("official"|"private"|None, label) for the running game clients together:
+        "official" when any client is on the official server, "private" when the only
+        known ones are on other servers."""
+        return summarize_clients(self.client_servers(official_names, private_names))
+
+    def exe_version(self, exclude=()):
+        """File version of the game exe, for the manifest (Windows only). Clients in
+        `exclude` (on another server, maybe another client build) are skipped."""
+        for pid in sorted(set(self.pids) - set(exclude)):
             path = self.exe_paths.get(pid)
             if path:
                 v = file_version(path)
@@ -360,6 +370,15 @@ def process_cmdline(pid):
         return psutil.Process(pid).cmdline()
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
         return []
+
+
+def summarize_clients(kinds):
+    """kinds: {pid: (kind, label)} -> one (kind, label) for the status line."""
+    for kind in ("official", "private"):
+        for k, label in kinds.values():
+            if k == kind:
+                return k, label
+    return None, None
 
 
 def classify_server(texts, official_names=("BlueDragon",), private_names=()):

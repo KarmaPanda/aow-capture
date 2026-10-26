@@ -7,7 +7,9 @@ to a server you were given an invite code for.
 - **Only the game's own traffic.** Only the game's connections to the official servers are
   saved; everything else on the PC (browser, Discord, other games) is dropped before anything
   is written. The PC's MAC address and local IP are replaced in the saved file.
-- **Official server only.** Sessions on any other server are never recorded or uploaded.
+- **Official server only.** Game clients on any other server are ignored, even while an
+  official client is being recorded next to them: none of their connections (direct or
+  through ExitLag's relay) are kept, and they're left out of the manifest.
 - **Works with ExitLag** in both modes: WFP (the game talks to ExitLag's relay on 127.0.0.1,
   recorded with a raw socket) and NDIS (Packet Monitor records every network layer, so the
   game's packets are caught above ExitLag's driver).

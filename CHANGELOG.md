@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.6
+
+- **A client on another server no longer stops the recording.** Each game client is
+  checked on its own: Blue Dragon clients are recorded, and a client on any other server
+  is ignored. None of its connections are kept (also not through ExitLag's relay), and
+  it's left out of the manifest (`ignored_clients` counts it). Before, one such client
+  meant nothing was recorded at all.
+
 ## v0.2.5
 
 - **Several game clients at once:** each recording now notes which game client (window)

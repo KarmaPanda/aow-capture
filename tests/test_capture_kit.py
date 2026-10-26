@@ -622,3 +622,125 @@ def test_reused_local_port_goes_to_newer_client():
     flows.add(6, LOCAL, 50001, SERVER, 2003, pid=2)   # client 1 closed, port reused by client 2
     c = {x["pid"]: x["connections"] for x in flows.clients_manifest()}
     assert c[1] == [] and len(c[2]) == 1
+
+
+class FakeSniffer:
+    """Stands in for the ExitLag-relay recorder: a ready-made loopback capture."""
+    src = None
+
+    def __init__(self, path, flows, log=print):
+        self.path, self.ports = FakeSniffer.src, {55616: "ExitLag"}
+        self.packets = self.part_packets = 3
+
+    def start_capture(self):
+        return True
+
+    def stop(self):
+        pass
+
+    def rotate(self):
+        return None, 0
+
+    def summary(self):
+        return {"relays": [{"port": 55616, "app": "ExitLag"}]}
+
+
+def test_official_client_recorded_next_to_one_on_another_server(tmp_path):
+    """One client on the official server, one on another server, both through ExitLag too:
+    only the official client's traffic, connections and details are saved."""
+    OTHER_SRV = "203.0.113.9"
+    big = b"\xce\x3b" * 600
+    nic = tmp_path / "nic.pcapng"
+    write_pcapng(nic, [
+        (1_000_000, tcp_packet(LOCAL, SERVER, 50001, 2003, big)),        # official client
+        (1_000_100, tcp_packet(SERVER, LOCAL, 2003, 50001, big)),
+        (1_000_200, tcp_packet(LOCAL, OTHER_SRV, 50002, 2003, b"other")),  # other client, its server
+        (1_000_300, tcp_packet(LOCAL, SERVER, 50005, 2003, b"other2")),    # other client -> official ip
+    ])
+    lo = tmp_path / "lo.pcapng"
+    relay_official = raw_ip(tcp_packet("127.0.0.1", "127.0.0.1", 60001, 55616, b"relay-ok" * 20))
+    relay_other = raw_ip(tcp_packet("127.0.0.1", "127.0.0.1", 60002, 55616, b"relay-other"))
+    relay_unknown = raw_ip(tcp_packet("127.0.0.1", "127.0.0.1", 60003, 55616, b"relay-unknown"))
+    with open(lo, "wb") as f:
+        f.write(pf.shb_block("x"))
+        f.write(pf.idb_block(pf.LINK_RAW, 65535, None))
+        for i, p in enumerate([relay_official, relay_other, relay_unknown]):
+            f.write(pf.epb_block(0, 2_000_000 + i * 100, p, len(p)))
+    FakeSniffer.src = str(lo)
+
+    class Watcher(FakeWatcher):
+        excluded = None
+
+        def exe_version(self, exclude=()):
+            Watcher.excluded = set(exclude)
+            return {"exe": "fxgame.exe", "version": "1.0.0.401"}
+
+    cfg = Config(path=str(tmp_path / "cfg.json"))
+    cfg.update(capture_dir=str(tmp_path / "caps"), known_ports=[])
+
+    def factory(*a, **k):
+        s = FakeSession(*a, **k)
+        s.src = str(nic)
+        return s
+    rec = Recorder(cfg, Watcher(), log=lambda m: None, session_factory=factory, sniffer_factory=FakeSniffer)
+    rec.start()
+    rec.flows.note_client(1, "fxgame.exe", 1.0, ["Age of Wushu   Launch-BlueDragon"])
+    rec.flows.note_client(2, "fxgame.exe", 2.0, ["Age of Wushu   Other-Server"])
+    rec.flows.add(6, LOCAL, 50001, SERVER, 2003, pid=1)
+    rec.flows.add(6, "127.0.0.1", 60001, "127.0.0.1", 55616, pid=1)
+    rec.flows.add(6, LOCAL, 50002, OTHER_SRV, 2003, pid=2)
+    rec.flows.add(6, LOCAL, 50005, SERVER, 2003, pid=2)
+    rec.flows.add(6, "127.0.0.1", 60002, "127.0.0.1", 55616, pid=2)
+    rec.note_clients({1: ("official", "Age of Wushu   Launch-BlueDragon"),
+                      2: ("private", "Age of Wushu   Other-Server")})
+    rec.note_clients({2: ("official", "flicker")})         # once ignored, always ignored
+    assert rec.ignored_pids == {2} and not rec.private_session
+    path = rec.stop()
+    assert path, "the official client's session must be saved"
+    with zipfile.ZipFile(path) as z:
+        man = json.loads(z.read("manifest.json"))
+        log = z.read("capture-log.txt").decode()
+        pkts = [p for p in read_packets(io_bytes(z, path)) if isinstance(p, bytes)]
+    payloads = b"".join(pkts)
+    assert b"other" not in payloads and b"relay-other" not in payloads
+    assert b"relay-unknown" not in payloads                 # relay link not owned by the official client
+    assert b"relay-ok" in payloads and big in payloads
+    assert len(pkts) == 3
+    assert [c["pid"] for c in man["clients"]] == [1] and man["ignored_clients"] == 1
+    ports = sorted(c["local_port"] for c in man["clients"][0]["connections"])
+    assert ports == [50001, 60001]
+    assert Watcher.excluded == {2}
+    blob = json.dumps(man) + log
+    assert OTHER_SRV not in blob and "Other-Server" not in blob
+
+
+def io_bytes(z, path):
+    """Extract the capture's .pcapng from the zip to a temp file next to it."""
+    name = next(n for n in z.namelist() if n.endswith(".pcapng"))
+    out = path + ".pcapng"
+    with open(out, "wb") as f:
+        f.write(z.read(name))
+    return out
+
+
+def test_only_other_server_clients_saves_nothing(tmp_path):
+    raw = sample(tmp_path)
+    cfg = Config(path=str(tmp_path / "cfg.json"))
+    cfg.update(capture_dir=str(tmp_path / "caps"))
+
+    def factory(*a, **k):
+        s = FakeSession(*a, **k)
+        s.src = str(raw)
+        return s
+    rec = Recorder(cfg, FakeWatcher(), log=lambda m: None, session_factory=factory, sniffer_factory=None)
+    rec.start()
+    rec.flows.add(6, LOCAL, 50001, SERVER, 2003, pid=7)
+    rec.note_clients({7: ("private", "Age of Wushu   Other-Server")})
+    assert rec.stop() is None and rec.skipped_private
+
+
+def test_summarize_clients():
+    from aowcap.gameproc import summarize_clients
+    assert summarize_clients({1: ("private", "a"), 2: ("official", "b")}) == ("official", "b")
+    assert summarize_clients({1: ("private", "a"), 2: (None, None)}) == ("private", "a")
+    assert summarize_clients({}) == (None, None)

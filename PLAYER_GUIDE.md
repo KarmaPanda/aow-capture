@@ -35,8 +35,13 @@ Before you play
 
 Only the official server is recorded
 ------------------------------------
-- The tool only records sessions on the official Blue Dragon server. If the
-  game is connected to any other server, it doesn't record, and nothing from that session is saved or uploaded.
+- The tool only records the official Blue Dragon server. A game client connected
+  to any other server is ignored: nothing it sends or receives is saved or
+  uploaded.
+- You can have a client on another server open at the same time as a Blue Dragon
+  client: only the Blue Dragon client is recorded. (If only clients on other
+  servers are open, nothing is recorded.) Write your markers and notes about the
+  Blue Dragon client.
 
 Recording
 ---------

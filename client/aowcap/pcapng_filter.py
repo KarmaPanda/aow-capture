@@ -224,9 +224,14 @@ class Anonymizer:
 # ---------------------------------------------------------------- the filter
 
 def filter_capture(in_path, out_path, remotes, local_ips=(), keep_ports=(),
-                   anonymize=True, dedupe=False, app="aow-capture", allowed_nets=None):
+                   anonymize=True, dedupe=False, app="aow-capture", allowed_nets=None,
+                   drop_conns=(), only_local_ports=None):
     """in_path: one path or a list (e.g. the NIC capture + the loopback capture).
     remotes: {(proto, ip_str, port)}; local_ips: {ip_str}; keep_ports: {port}.
+    drop_conns: {(proto, local_port, remote_ip_str, remote_port)} never kept (connections
+    of a game client that is on another server).
+    only_local_ports: {(proto, remote_ip_str, remote_port): {local_port, …}}: for these
+    remotes, only connections from the listed local ports are kept.
 
     Returns stats {packets_in, packets_out, duplicates, bytes_out, first_ts_ns, last_ts_ns}.
     """
@@ -234,6 +239,9 @@ def filter_capture(in_path, out_path, remotes, local_ips=(), keep_ports=(),
     locals_ = {ipaddress.ip_address(ip) for ip in local_ips}
     keep_ports = {int(p) for p in keep_ports}
     nets = [ipaddress.ip_network(n) for n in allowed_nets] if allowed_nets else None
+    drop = {(p, int(lp), ipaddress.ip_address(ip), int(port)) for p, lp, ip, port in drop_conns}
+    only = {(p, ipaddress.ip_address(ip), int(port)): {int(x) for x in lps}
+            for (p, ip, port), lps in (only_local_ports or {}).items()}
 
     def allowed(ip):
         return nets is None or any(ip in n for n in nets)
@@ -295,6 +303,16 @@ def filter_capture(in_path, out_path, remotes, local_ips=(), keep_ports=(),
             if remote_is_dst and remote_is_src:  # odd: decide by known local IPs
                 remote_is_src = p["dst"] in locals_
                 remote_is_dst = not remote_is_src
+            if drop or only:
+                if remote_is_dst:
+                    conn = (p["proto"], p["sport"], p["dst"], p["dport"])
+                else:
+                    conn = (p["proto"], p["dport"], p["src"], p["sport"])
+                if conn in drop:
+                    continue
+                allowed_lports = only.get((conn[0], conn[2], conn[3]))
+                if allowed_lports is not None and conn[1] not in allowed_lports:
+                    continue
 
             if dedupe:
                 digest = hashlib.blake2b(data[p["l3"]:], digest_size=12).digest()

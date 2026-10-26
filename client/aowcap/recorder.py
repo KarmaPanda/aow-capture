@@ -50,6 +50,7 @@ class Recorder:
         self.log_lines = []
         self.warning = None
         self.servers_seen = {}
+        self.client_kinds = {}       # pid -> "official" / "private" (sticky for the session)
         self.cut_at = None
         self.part = 0
         self.marker_idx = 0
@@ -82,6 +83,7 @@ class Recorder:
                 return
             self.log_lines = []
             self.servers_seen = {}   # "official"/"private" -> label
+            self.client_kinds = {}
             self.workdir = tempfile.mkdtemp(prefix="aowcap_")
             ports = list(self.cfg.get("server_ports") or [])
             # With a booster running, record every layer of the network stack: drivers like
@@ -98,7 +100,7 @@ class Recorder:
             self.flows = FlowSet()
             self.tracker = FlowTracker(
                 self.watcher, self.flows, self.cfg.get("ignore_ports", ()),
-                on_new=lambda k: self._log(f"Game connection: {'TCP' if k[0] == TCP else 'UDP'} {k[1]}:{k[2]}"))
+                on_new=self._on_new_connection)
             self.tracker.start()
             self.sniffer = None
             if self.sniffer_factory and self.cfg.get("capture_loopback", True):
@@ -115,15 +117,42 @@ class Recorder:
             self.session_id = datetime.fromtimestamp(self.started_at).strftime("%Y%m%d_%H%M%S")
             self._log(f"Recording started ({reason}).")
 
-    def note_server(self, kind, label):
-        """The app reports which server the game client is on (window title / launch args)."""
-        if kind and kind not in self.servers_seen and self.recording:
-            self.servers_seen[kind] = label
-            self._log(f"Game server: {label} ({kind})")
+    def _on_new_connection(self, k):
+        # Only official game connections are named in the log (it goes into the zip).
+        if self.official_remote(k):
+            self._log(f"Game connection: {'TCP' if k[0] == TCP else 'UDP'} {k[1]}:{k[2]}")
+
+    def note_clients(self, kinds):
+        """The app reports which server each game client is on: {pid: (kind, label)} from
+        window titles / launch args. A client on another server is ignored for the rest of
+        the recording: nothing it connects to is kept, while other clients still are."""
+        if not self.recording:
+            return
+        for pid, (kind, label) in kinds.items():
+            prev = self.client_kinds.get(pid)
+            if kind == "private" and prev != "private":
+                self.client_kinds[pid] = "private"
+                self.servers_seen.setdefault("private", label)
+                self._log(f"A game client on another server is open (pid {pid}); it is ignored.")
+            elif kind == "official" and prev is None:
+                self.client_kinds[pid] = "official"
+                if "official" not in self.servers_seen:
+                    self.servers_seen["official"] = label
+                    self._log(f"Game server: {label}")
+
+    def note_server(self, kind, label, pid=None):
+        """Older single-client form of note_clients."""
+        self.note_clients({pid: (kind, label)})
+
+    @property
+    def ignored_pids(self):
+        return {p for p, k in getattr(self, "client_kinds", {}).items() if k == "private"}
 
     @property
     def private_session(self):
-        return "private" in getattr(self, "servers_seen", {})
+        """Only clients on other servers were seen: nothing to save."""
+        kinds = getattr(self, "client_kinds", {})
+        return "private" in kinds.values() and "official" not in kinds.values()
 
     def official_remote(self, remote, relay_ports=()):
         proto, ip, port = remote
@@ -168,7 +197,7 @@ class Recorder:
         """Auto-save: save everything recorded since the last cut as a part, while recording
         carries on into new files. Returns the part's zip path, or None if it held nothing."""
         with self.lock:
-            if not self.session or self.private_session:
+            if not self.session:
                 return None
             session, sniffer = self.session, self.sniffer
             t_from, t_to = self.cut_at, time.time()
@@ -209,8 +238,7 @@ class Recorder:
                 sniffer.stop()
             try:
                 if self.private_session:
-                    self._log(f"The game was on another server ({self.servers_seen['private']}); "
-                              "nothing saved.")
+                    self._log("The game was only on another server; nothing saved.")
                     self.skipped_private = True
                     return None
                 raw_inputs = [("etl", session.etl)]
@@ -231,9 +259,21 @@ class Recorder:
         remotes |= {(TCP, "127.0.0.1", port) for port in relay_ports}
         dropped = {r for r in remotes if not self.official_remote(r, relay_ports)}
         if dropped and final:
-            self._log("Ignored non-official connections: "
-                      + ", ".join(f"{ip}:{port}" for _, ip, port in sorted(dropped)))
+            self._log(f"Ignored {len(dropped)} non-official connection(s).")
         remotes -= dropped
+        # Clients on another server: drop every connection they made, and through a local
+        # relay (ExitLag) keep only connections that belong to the other clients.
+        ignored = self.ignored_pids
+        owners = flows.conn_owners()
+        drop_conns, only_local_ports = set(), None
+        if ignored:
+            drop_conns = {c for c, pid in owners.items() if pid in ignored}
+            kept_by = {(p, ip, port) for (p, _, ip, port), pid in owners.items() if pid not in ignored}
+            remotes -= {(p, ip, port) for (p, _, ip, port) in drop_conns} - kept_by
+            only_local_ports = {
+                (TCP, "127.0.0.1", port): {lp for (p, lp, ip, rp), pid in owners.items()
+                                           if ip == "127.0.0.1" and rp == port and pid not in ignored}
+                for port in relay_ports}
         keep_ports = set(self.cfg.get("server_ports") or []) | set(self.cfg.get("known_ports") or [])
         if not remotes and not keep_ports:
             self._log("No game connections were seen; nothing saved.")
@@ -254,7 +294,8 @@ class Recorder:
                                anonymize=self.cfg.get("anonymize_local", True),
                                dedupe=(not session.nics_only) or len(inputs) > 1,
                                app=f"{APP_NAME} {VERSION}",
-                               allowed_nets=self.cfg.get("official_networks") or None)
+                               allowed_nets=self.cfg.get("official_networks") or None,
+                               drop_conns=drop_conns, only_local_ports=only_local_ports)
         self._log(f"{'Part ' + str(part_no) + ': k' if multipart else 'K'}ept {stats['packets_out']} of "
                   f"{stats['packets_in']} packets"
                   + (f" ({stats['duplicates']} duplicates dropped)" if stats["duplicates"] else ""))
@@ -284,7 +325,8 @@ class Recorder:
             "gap_after_s": gap_after,
             "start_reason": self.started_reason,
             "markers": markers,
-            "game": self.watcher.exe_version(),
+            "game": (self.watcher.exe_version(exclude=ignored) if ignored
+                     else self.watcher.exe_version()),
             "server_endpoints": [e for e in flows.to_manifest()
                                  if (TCP if e["proto"] == "tcp" else 17, e["ip"], e["port"]) in remotes]
                                 + [{"proto": "tcp", "ip": "127.0.0.1", "port": p, "first_seen": 0}
@@ -294,7 +336,9 @@ class Recorder:
             # Which game client (window / process) made which connection: lets the decoder
             # label each stream when several clients were recorded together.
             "clients": flows.clients_manifest(
-                keep=lambda p, ip, port: (p, ip, port) in remotes or (ip == "127.0.0.1" and port in relay_ports)),
+                keep=lambda p, ip, port: (p, ip, port) in remotes or (ip == "127.0.0.1" and port in relay_ports),
+                exclude=ignored),
+            "ignored_clients": len(ignored),   # game clients on another server, left out
             "server_ports_filter": sorted(keep_ports),
             "game_server": self.servers_seen.get("official"),
             "official_networks": self.cfg.get("official_networks"),

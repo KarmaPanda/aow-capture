@@ -11,7 +11,7 @@ from tkinter import messagebox, simpledialog, ttk
 
 from . import APP_NAME, VERSION
 from .config import Config, applog
-from .gameproc import GameWatcher, tunnel_apps_running
+from .gameproc import GameWatcher, summarize_clients, tunnel_apps_running
 from .pktmon import cleanup as pktmon_cleanup, pktmon_path
 from .recorder import Recorder
 from . import tray as traymod
@@ -453,26 +453,25 @@ class App:
                 pids = self.watcher.refresh()
             except Exception:
                 pids = set()
-            ident = (None, None)
+            kinds = {}
             if pids:
                 try:
-                    ident = self.watcher.server_identity(self.cfg.get("official_servers") or (),
-                                                         self.cfg.get("private_servers") or ())
+                    kinds = self.watcher.client_servers(self.cfg.get("official_servers") or (),
+                                                        self.cfg.get("private_servers") or ())
                 except Exception:
                     pass
-            self.events.put(("game", (self.watcher.describe(), ident)))
-            if ident[0] == "private":
-                if self.recorder.recording:
-                    self.recorder.note_server(*ident)  # the recording is discarded when it stops
-                    self.game_seen_in_capture = True    # so it still stops when the game closes
-                time.sleep(2)
-                continue  # never auto-start on a non-official server
-            if ident[0] == "official" and self.recorder.recording:
-                self.recorder.note_server(*ident)
+            # Clients on another server are left out (their traffic is never kept); the
+            # others (official, or not known yet) are recorded.
+            others = {pid for pid, (k, _) in kinds.items() if k == "private"}
+            playable = set(pids) - others
+            ident = summarize_clients({p: kinds[p] for p in kinds if p in playable} or kinds)
+            self.events.put(("game", (self.watcher.describe(), ident, len(others) if playable else 0)))
+            if self.recorder.recording and kinds:
+                self.recorder.note_clients(kinds)
             if self.busy:
                 time.sleep(2)
                 continue
-            if pids:
+            if playable:
                 self.game_gone_since = None
                 if self.recorder.recording:
                     self.game_seen_in_capture = True
@@ -517,7 +516,7 @@ class App:
                 if kind == "log" or kind == "status":
                     self.status.set(val)
                 elif kind == "game":
-                    desc, (server_kind, label) = val
+                    desc, (server_kind, label), ignored = val
                     if (server_kind, label) != getattr(self, "_last_ident", None):
                         self._last_ident = (server_kind, label)
                         applog(f"Game: {desc or 'not running'}; server: {label or 'unknown'} ({server_kind})")
@@ -527,7 +526,9 @@ class App:
                     elif server_kind == "private":
                         self.game_var.set(f"Game running on another server ({label}): not recorded")
                     else:
-                        self.game_var.set(f"Game running: {desc}" + (f" - {label}" if label else ""))
+                        self.game_var.set(f"Game running: {desc}" + (f" - {label}" if label else "")
+                                          + (f"; {ignored} client(s) on another server ignored"
+                                             if ignored else ""))
                 elif kind == "list":
                     self.refresh_list()
                 elif kind == "upload_label":
