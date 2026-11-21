@@ -7,9 +7,10 @@ to a server you were given an invite code for.
 - **Only the game's own traffic.** Only the game's connections to the official servers are
   saved; everything else on the PC (browser, Discord, other games) is dropped before anything
   is written. The PC's MAC address and local IP are replaced in the saved file.
-- **Official server only.** Game clients on any other server are ignored, even while an
-  official client is being recorded next to them: none of their connections (direct or
-  through ExitLag's relay) are kept, and they're left out of the manifest.
+- **Official server only, unless told otherwise.** Game clients on any other server are
+  ignored, even while an official client is being recorded next to them: none of their
+  connections (direct or through ExitLag's relay) are kept, and they're left out of the
+  manifest. Other servers can be allowed with server profiles (below).
 - **Works with ExitLag** in both modes: WFP (the game talks to ExitLag's relay on 127.0.0.1,
   recorded with a raw socket) and NDIS (Packet Monitor records every network layer, so the
   game's packets are caught above ExitLag's driver).
@@ -48,6 +49,30 @@ Each recording is a zip, `official_<date>_<time>.zip` (with an invite code,
 
 The capture does contain what the game itself sends and receives, including your
 character, chat and the login exchange, so only share recordings with people you trust.
+
+## Other servers (server profiles)
+
+Besides the official server, a recording can be of another server that has a **server
+profile**: an id, a name, and text that appears in the game window title. Profiles come
+from `extra_servers` in `config.json`, or from the upload server when the tool checks in
+(`record_servers` in the ping answer), so they can be added without a new release:
+
+```json
+{"id": "example", "name": "Example.org", "match": ["Example.org"],
+ "networks": ["203.0.113.0/24"], "ports": [7000]}
+```
+
+- Each recording is of **one** server: the first one seen (the official server if both
+  start together). Clients on any other server are ignored as above.
+- Files are named after the profile (`example_<date>_<time>.zip` instead of `official_…`)
+  and the manifest says which server it was (`"server": {"kind": "extra", "id": …}`), so
+  they're never mistaken for official recordings.
+- Without `networks`, the tool keeps the connections that server's game client itself
+  opened (except web ports 53, 80, 443, 8080), and Packet Monitor records everything until
+  the game window shows which server it is. With `networks` (and optionally `ports`), only
+  that traffic is kept and Packet Monitor is limited to it.
+- With profiles configured, automatic recording waits up to 10 s after the game starts
+  for its window title, which decides which server is recorded.
 
 ## How updates work
 

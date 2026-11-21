@@ -162,7 +162,7 @@ class FakeSession:
 class FakeWatcher:
     pids = set()
 
-    def exe_version(self):
+    def exe_version(self, exclude=()):
         return {"exe": "fxgame.exe", "version": "1.0.0.401"}
 
 
@@ -820,3 +820,132 @@ def test_autosave_also_when_raw_file_fills(monkeypatch, autosave, raw_mb, since,
     monkeypatch.setattr(A.threading, "Thread", lambda target, **k: NS(start=target))
     A.App._maybe_autosave(me)
     assert bool(saved) == expect and me.checkpointing == expect
+
+
+EXAMPLE_PROFILE = {"id": "example", "name": "Example.org", "match": ["Example.org"]}
+EXAMPLE_TITLE = "Example.org 9X-TXT 1.0.6.0.7 Server: AOW_3-Channel_1"
+
+
+def test_server_profiles_are_validated():
+    from aowcap import servers as srv
+    got = srv.normalize([
+        EXAMPLE_PROFILE,
+        {"id": "example", "name": "dup", "match": ["Duplicate"]},           # same id
+        {"id": "official", "match": ["Anything"]},                           # reserved
+        {"id": "Bad Id!", "match": ["Something"]},
+        {"id": "nomatch", "match": ["ab"]},                                   # too short
+        {"id": "nets", "match": ["Nets.example"], "networks": ["203.0.113.7/24", "nope"],
+         "ports": [7000, "7001", 0, 70000, "x"]},
+        "junk",
+    ])
+    assert [p["id"] for p in got] == ["example", "nets"]
+    assert got[1]["networks"] == ["203.0.113.0/24"] and got[1]["ports"] == [7000, 7001]
+    assert srv.normalize("not a list") == []
+    cfg = {"extra_servers": [{"id": "example", "name": "Mine", "match": ["Example.org"]}],
+           "remote_servers": [EXAMPLE_PROFILE, {"id": "other", "match": ["Other.example"]}]}
+    assert [(p["id"], p["name"]) for p in srv.profiles(cfg)] == [("example", "Mine"), ("other", "other")]
+
+
+def test_classify_extra_server_by_window_title():
+    from aowcap.gameproc import classify_server
+    from aowcap import servers as srv
+    from aowcap.gameproc import summarize_clients
+    profs = srv.normalize([EXAMPLE_PROFILE])
+    assert classify_server([EXAMPLE_TITLE], profiles=profs) == ("extra:example", EXAMPLE_TITLE)
+    assert classify_server([EXAMPLE_TITLE]) == (None, None)               # without the profile
+    assert classify_server(["Age of Wushu   Launch-BlueDragon"], profiles=profs)[0] == "official"
+    assert classify_server([EXAMPLE_TITLE], private_names=["Example"], profiles=profs)[0] == "private"
+    assert summarize_clients({1: ("private", "a"), 2: ("extra:example", "b")}) == ("extra:example", "b")
+    assert summarize_clients({1: ("extra:example", "b"), 2: ("official", "c")}) == ("official", "c")
+
+
+def _extra_recorder(tmp_path, nic_packets, profile=EXAMPLE_PROFILE):
+    nic = tmp_path / "nic.pcapng"
+    write_pcapng(nic, nic_packets)
+    cfg = Config(path=str(tmp_path / "cfg.json"))
+    cfg.update(capture_dir=str(tmp_path / "caps"), remote_servers=[profile])
+
+    def factory(*a, **k):
+        s = FakeSession(*a, **k)
+        s.src = str(nic)
+        return s
+    rec = Recorder(cfg, FakeWatcher(), log=lambda m: None, session_factory=factory, sniffer_factory=None)
+    return rec
+
+
+def _zip_contents(path):
+    with zipfile.ZipFile(path) as z:
+        man = json.loads(z.read("manifest.json"))
+        log = z.read("capture-log.txt").decode()
+        pkts = [p for p in read_packets(io_bytes(z, path)) if isinstance(p, bytes)]
+    return man, log, pkts
+
+
+def test_extra_server_recorded_by_its_clients_connections(tmp_path):
+    """A client on an extra server without a known address range: its own game connections
+    are kept; its web traffic, other clients (also an official one) and strangers aren't."""
+    XS, OTHER_IP = "198.51.100.7", "198.51.100.8"
+    big = b"\x11\x22" * 700
+    rec = _extra_recorder(tmp_path, [
+        (1_000_000, tcp_packet(LOCAL, XS, 50001, 7001, big)),               # its game link
+        (1_000_100, tcp_packet(XS, LOCAL, 7001, 50001, big)),
+        (1_000_200, tcp_packet(LOCAL, XS, 50002, 443, b"web-traffic")),     # its web traffic
+        (1_000_300, tcp_packet(LOCAL, SERVER, 50003, 2003, b"bd-client")),  # official client
+        (1_000_400, tcp_packet(LOCAL, OTHER_IP, 50004, 7001, b"stranger")), # no client's
+        (1_000_500, tcp_packet(LOCAL, XS, 50005, 7001, b"unclassified")),  # client of unknown server
+    ])
+    assert rec._prefilter_networks(None) == []          # an extra server without a range: record all
+    rec.start(target_hint="extra:example")
+    rec.flows.note_client(1, "fxgame.exe", 1.0, [EXAMPLE_TITLE])
+    rec.flows.note_client(2, "fxgame.exe", 2.0, ["Age of Wushu   Launch-BlueDragon"])
+    rec.flows.add(6, LOCAL, 50001, XS, 7001, pid=1)
+    rec.flows.add(6, LOCAL, 50002, XS, 443, pid=1)
+    rec.flows.add(6, LOCAL, 50003, SERVER, 2003, pid=2)
+    rec.flows.add(6, LOCAL, 50005, XS, 7001, pid=3)
+    rec.note_clients({1: ("extra:example", EXAMPLE_TITLE), 3: (None, None)})
+    rec.note_clients({2: ("official", "Age of Wushu   Launch-BlueDragon")})  # later: ignored
+    assert rec.target == "extra:example" and rec.ignored_pids == {2}
+    path = rec.stop()
+    assert path and os.path.basename(path).startswith("example_")
+    man, log, pkts = _zip_contents(path)
+    payloads = b"".join(pkts)
+    assert big in payloads and len(pkts) == 2
+    for junk in (b"web-traffic", b"bd-client", b"stranger", b"unclassified"):
+        assert junk not in payloads
+    assert man["server"]["kind"] == "extra" and man["server"]["id"] == "example"
+    assert man["server"]["name"] == "Example.org" and man["game_server"] == EXAMPLE_TITLE
+    assert [(e["ip"], e["port"]) for e in man["server_endpoints"]] == [(XS, 7001)]
+    assert [c["pid"] for c in man["clients"]] == [1] and man["ignored_clients"] >= 1
+    assert "Launch-BlueDragon" not in json.dumps(man) + log
+
+
+def test_extra_server_with_known_range(tmp_path):
+    XS = "198.51.100.7"
+    prof = dict(EXAMPLE_PROFILE, networks=["198.51.100.0/24"], ports=[7001])
+    rec = _extra_recorder(tmp_path, [
+        (1_000_000, tcp_packet(LOCAL, XS, 50001, 7001, b"\x01" * 3000)),
+        (1_000_100, tcp_packet(LOCAL, "198.51.100.9", 50009, 7001, b"\x02" * 3000)),  # same range, port
+        (1_000_200, tcp_packet(LOCAL, XS, 50002, 7002, b"other-port")),
+    ], prof)
+    assert rec._prefilter_networks("extra:example") == ["198.51.100.0/24"]
+    assert rec._prefilter_networks("official") == ["148.153.0.0/16"]
+    assert rec._prefilter_networks(None) == ["148.153.0.0/16", "198.51.100.0/24"]
+    rec.start()
+    rec.flows.note_client(1, "fxgame.exe", 1.0, [EXAMPLE_TITLE])
+    rec.flows.add(6, LOCAL, 50001, XS, 7001, pid=1)
+    rec.note_clients({1: ("extra:example", EXAMPLE_TITLE)})
+    man, _, pkts = _zip_contents(rec.stop())
+    assert len(pkts) == 2 and b"other-port" not in b"".join(pkts)   # range + port, as known
+    assert man["server"]["networks"] == ["198.51.100.0/24"]
+
+
+def test_official_server_wins_when_both_start_together(tmp_path):
+    rec = _extra_recorder(tmp_path, [(1_000_000, tcp_packet(LOCAL, SERVER, 50001, 2003, b"\x01" * 3000))])
+    rec.start()
+    rec.flows.add(6, LOCAL, 50001, SERVER, 2003, pid=2)
+    rec.note_clients({1: ("extra:example", EXAMPLE_TITLE), 2: ("official", "Age of Wushu   Launch-BlueDragon")})
+    assert rec.target == "official" and rec.ignored_pids == {1}
+    path = rec.stop()
+    assert os.path.basename(path).startswith("official_")
+    man, _, _ = _zip_contents(path)
+    assert man["server"] == {"kind": "official", "id": "official", "label": "Age of Wushu   Launch-BlueDragon"}

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.8
+
+- **Can record other servers too, when allowed.** A server profile (from the upload
+  server, or `extra_servers` in config.json) names another server by its game window
+  title. Its sessions are recorded like official ones, but named after the profile
+  (`<id>_<date>_<time>.zip`) and marked in the manifest (`"server"`), keeping only the
+  connections that server's game client opened. Each recording is of one server; clients
+  on any other server are still ignored.
+- The manifest now always says which server a recording is of (`"server"`).
+
 ## v0.2.7
 
 - **Much smaller raw recordings.** Packet Monitor now records only the official servers'

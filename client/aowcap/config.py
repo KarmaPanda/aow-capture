@@ -27,6 +27,10 @@ DEFAULTS = {
     # server; private_servers lists extra names to treat that way.
     "official_servers": ["BlueDragon"],
     "private_servers": [],
+    # Other servers that may be recorded too (see servers.py); the upload server can add
+    # more when the tool checks in ("remote_servers").
+    "extra_servers": [],
+    "remote_servers": [],
     # Remote ports that are never game traffic (launcher, web, patcher).
     "ignore_ports": [80, 443, 8080],
     # If set, pktmon only records these ports (much smaller raw files, nothing else on the PC).

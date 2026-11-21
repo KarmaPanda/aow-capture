@@ -94,6 +94,7 @@ def report():
     add(f"Config: capture_loopback={cfg.get('capture_loopback', True)} "
         f"auto_record={cfg.get('auto_record')} official_networks={cfg.get('official_networks')} "
         f"official_servers={cfg.get('official_servers')} private_servers={cfg.get('private_servers')} "
+        f"extra servers={[p['name'] for p in _profiles(cfg)]} "
         f"upload={'yes' if cfg.can_upload else 'no invite code'}")
     add("")
 
@@ -122,7 +123,7 @@ def report():
         titles = window_titles(pid)
         args = [a for a in process_cmdline(pid)[1:] if "-" in a and len(a) < 80 and "=" not in a]
         add(f"  pid {pid}: titles={titles} server-like args={args}")
-        add(f"    classified as: {classify_server(titles + args, cfg.get('official_servers') or (), cfg.get('private_servers') or ())}")
+        add(f"    classified as: {classify_server(titles + args, cfg.get('official_servers') or (), cfg.get('private_servers') or (), _profiles(cfg))}")
         try:
             conns = psutil.Process(pid).net_connections(kind="inet")
         except Exception as e:
@@ -140,7 +141,7 @@ def report():
                     note += "  [relay: recorded]"
             add(f"    {'TCP' if int(c.type) == 1 else 'UDP'} {c.laddr.ip}:{c.laddr.port} -> "
                 f"{c.raddr.ip}:{c.raddr.port} {c.status}{note}")
-    add(f"  overall: {w.server_identity(cfg.get('official_servers') or (), cfg.get('private_servers') or ())}")
+    add(f"  overall: {w.server_identity(cfg.get('official_servers') or (), cfg.get('private_servers') or (), _profiles(cfg))}")
     add("")
     add("Loopback capture test: " + _loopback_probe(set(relays)))
     add("")
@@ -167,3 +168,11 @@ def write_and_open():
         except OSError:
             pass
     return path
+
+
+def _profiles(cfg):
+    from .servers import profiles
+    try:
+        return profiles(cfg)
+    except Exception:
+        return []

@@ -14,7 +14,8 @@ from datetime import datetime
 from . import APP_NAME, VERSION
 from .config import applog
 from .gameproc import tunnel_apps_running
-from .gameproc import FlowSet, FlowTracker, TCP
+from .gameproc import FlowSet, FlowTracker, TCP, is_recordable
+from . import servers as srv
 from .pcapng_filter import filter_capture
 from .loopcap import LoopbackSniffer
 from .pktmon import PktmonSession
@@ -50,7 +51,8 @@ class Recorder:
         self.log_lines = []
         self.warning = None
         self.servers_seen = {}
-        self.client_kinds = {}       # pid -> "official" / "private" (sticky for the session)
+        self.client_kinds = {}       # pid -> its server kind, or "ignored" (sticky for the session)
+        self.target = None           # the server this recording is of: "official" / "extra:<id>"
         self.cut_at = None
         self.part = 0
         self.marker_idx = 0
@@ -77,13 +79,16 @@ class Recorder:
         return len(self.flows.remotes) if self.flows else 0
 
     # -------------------------------------------------- start / mark / stop
-    def start(self, reason="manual"):
+    def start(self, reason="manual", target_hint=None):
+        """target_hint: the server the game clients are on, if already known ("official",
+        "extra:<id>"); it decides what Packet Monitor is told to record."""
         with self.lock:
             if self.session:
                 return
             self.log_lines = []
-            self.servers_seen = {}   # "official"/"private" -> label
+            self.servers_seen = {}   # "official"/"extra"/"private" -> label
             self.client_kinds = {}
+            self.target = None
             self.workdir = tempfile.mkdtemp(prefix="aowcap_")
             ports = list(self.cfg.get("server_ports") or [])
             # With a booster running, record every layer of the network stack: drivers like
@@ -93,9 +98,9 @@ class Recorder:
             all_layers = bool(boosters) or bool(self.cfg.get("pktmon_all_components"))
             if boosters:
                 self._log(f"{', '.join(boosters)} running: recording every network layer.")
-            # Packet Monitor records only the official servers' range: the raw file then
-            # holds game traffic only and fills up far slower (the rest is dropped at save).
-            nets = self.cfg.get("official_networks") if self.cfg.get("prefilter_networks", True) else ()
+            # Packet Monitor records only the servers' ranges: the raw file then holds game
+            # traffic only and fills up far slower (the rest is dropped at save).
+            nets = self._prefilter_networks(target_hint) if self.cfg.get("prefilter_networks", True) else ()
             session = self.session_factory(self.workdir, ports, self.cfg.get("raw_limit_mb", 4096),
                                            log=self._log, all_components=all_layers, nets=nets or ())
             session.start()
@@ -120,28 +125,65 @@ class Recorder:
             self.session_id = datetime.fromtimestamp(self.started_at).strftime("%Y%m%d_%H%M%S")
             self._log(f"Recording started ({reason}).")
 
+    def _prefilter_networks(self, hint):
+        """What Packet Monitor may be limited to. Nothing (= everything) while a server
+        that may be recorded has no known address range, unless the official one is
+        known to be the one played."""
+        official = list(self.cfg.get("official_networks") or [])
+        profs = srv.profiles(self.cfg)
+        prof = srv.by_kind(hint, profs)
+        if hint == "official":
+            return official
+        if prof:
+            return list(prof["networks"])
+        if any(not p["networks"] for p in profs):
+            return []
+        return official + [n for p in profs for n in p["networks"]]
+
+    @property
+    def target_profile(self):
+        return srv.by_kind(self.target, srv.profiles(self.cfg))
+
     def _on_new_connection(self, k):
-        # Only official game connections are named in the log (it goes into the zip).
-        if self.official_remote(k):
+        # Only connections to the recorded server's range are named in the log (it goes
+        # into the zip); others aren't known to be game traffic yet.
+        if self.official_remote(k, owners=False):
             self._log(f"Game connection: {'TCP' if k[0] == TCP else 'UDP'} {k[1]}:{k[2]}")
 
     def note_clients(self, kinds):
         """The app reports which server each game client is on: {pid: (kind, label)} from
-        window titles / launch args. A client on another server is ignored for the rest of
-        the recording: nothing it connects to is kept, while other clients still are."""
+        window titles / launch args. The first client on a server that may be recorded
+        (the official one first) picks this recording's server. Clients on any other
+        server are ignored for the rest of the recording: nothing they connect to is kept,
+        while the clients on the recorded server still are."""
         if not self.recording:
             return
+        if self.target is None:
+            for want in ("official", "extra:"):
+                found = [(pid, label) for pid, (k, label) in sorted(kinds.items(), key=lambda x: str(x[0]))
+                         if k and k.startswith(want) and self.client_kinds.get(pid) != "ignored"]
+                if found:
+                    kind = kinds[found[0][0]][0]
+                    prof = srv.by_kind(kind, srv.profiles(self.cfg))
+                    if kind != "official" and not prof:
+                        continue
+                    self.target = kind
+                    label = found[0][1]
+                    self.servers_seen["official" if kind == "official" else "extra"] = label
+                    self._log(f"Game server: {label}" if kind == "official"
+                              else f"Game server: {prof['name']} ({label})")
+                    break
         for pid, (kind, label) in kinds.items():
             prev = self.client_kinds.get(pid)
-            if kind == "private" and prev != "private":
-                self.client_kinds[pid] = "private"
+            if kind is None or prev == "ignored":
+                continue
+            if kind == self.target:
+                if prev is None:
+                    self.client_kinds[pid] = kind
+            elif kind == "private" or (self.target and is_recordable(kind)):
+                self.client_kinds[pid] = "ignored"
                 self.servers_seen.setdefault("private", label)
                 self._log(f"A game client on another server is open (pid {pid}); it is ignored.")
-            elif kind == "official" and prev is None:
-                self.client_kinds[pid] = "official"
-                if "official" not in self.servers_seen:
-                    self.servers_seen["official"] = label
-                    self._log(f"Game server: {label}")
 
     def note_server(self, kind, label, pid=None):
         """Older single-client form of note_clients."""
@@ -149,15 +191,22 @@ class Recorder:
 
     @property
     def ignored_pids(self):
-        return {p for p, k in getattr(self, "client_kinds", {}).items() if k == "private"}
+        return {p for p, k in getattr(self, "client_kinds", {}).items() if k == "ignored"}
+
+    @property
+    def target_pids(self):
+        t = getattr(self, "target", None)
+        return {p for p, k in getattr(self, "client_kinds", {}).items() if t and k == t}
 
     @property
     def private_session(self):
         """Only clients on other servers were seen: nothing to save."""
-        kinds = getattr(self, "client_kinds", {})
-        return "private" in kinds.values() and "official" not in kinds.values()
+        return getattr(self, "target", None) is None and bool(self.ignored_pids)
 
-    def official_remote(self, remote, relay_ports=()):
+    def official_remote(self, remote, relay_ports=(), owners=None):
+        """Is this remote endpoint the recorded server's? (The official range, or an extra
+        server's range; for an extra server without a range: a non-web endpoint that one
+        of its clients connected to. owners: FlowSet.conn_owners(), or False to skip that.)"""
         proto, ip, port = remote
         try:
             addr = ipaddress.ip_address(ip)
@@ -165,7 +214,20 @@ class Recorder:
             return False
         if addr.is_loopback:
             return proto == TCP and port in relay_ports
-        return any(addr in ipaddress.ip_network(n) for n in self.cfg.get("official_networks") or [])
+        prof = self.target_profile
+        if not prof:
+            return any(addr in ipaddress.ip_network(n) for n in self.cfg.get("official_networks") or [])
+        if prof["networks"]:
+            return srv.in_networks(ip, prof["networks"]) and (not prof["ports"] or port in prof["ports"])
+        if owners is False:
+            return False
+        if owners is None:
+            owners = self.flows.conn_owners() if self.flows else {}
+        if (prof["ports"] and port not in prof["ports"]) or port in srv.WEB_PORTS:
+            return False
+        mine = self.target_pids
+        return any(pid in mine and (p, rip, rport) == (proto, ip, port)
+                   for (p, _, rip, rport), pid in owners.items())
 
     def add_marker(self, text):
         if not self.recording or not text.strip():
@@ -260,16 +322,22 @@ class Recorder:
         remotes, local_ips = flows.snapshot()
         relay_ports = set(sniffer.ports) if sniffer and sniffer.packets else set()
         remotes |= {(TCP, "127.0.0.1", port) for port in relay_ports}
-        dropped = {r for r in remotes if not self.official_remote(r, relay_ports)}
+        owners = flows.conn_owners()
+        prof = self.target_profile
+        dropped = {r for r in remotes if not self.official_remote(r, relay_ports, owners)}
         if dropped and final:
             self._log(f"Ignored {len(dropped)} non-official connection(s).")
         remotes -= dropped
         # Clients on another server: drop every connection they made, and through a local
         # relay (ExitLag) keep only connections that belong to the other clients.
         ignored = self.ignored_pids
-        owners = flows.conn_owners()
+        if prof:
+            # An extra server: only its own clients' connections. Unclassified clients'
+            # connections to the same endpoints are dropped too (could be another server).
+            mine = self.target_pids
+            ignored = ignored | {pid for pid in set(owners.values()) if pid not in mine}
         drop_conns, only_local_ports = set(), None
-        if ignored:
+        if ignored or prof:
             drop_conns = {c for c, pid in owners.items() if pid in ignored}
             kept_by = {(p, ip, port) for (p, _, ip, port), pid in owners.items() if pid not in ignored}
             remotes -= {(p, ip, port) for (p, _, ip, port) in drop_conns} - kept_by
@@ -278,6 +346,8 @@ class Recorder:
                                            if ip == "127.0.0.1" and rp == port and pid not in ignored}
                 for port in relay_ports}
         keep_ports = set(self.cfg.get("server_ports") or []) | set(self.cfg.get("known_ports") or [])
+        if prof:  # an extra server: its ports, and only within its known ranges
+            keep_ports = set(prof["ports"]) if prof["networks"] else set()
         if not remotes and not keep_ports:
             self._log("No game connections were seen; nothing saved.")
             return None
@@ -289,7 +359,7 @@ class Recorder:
         part_no = self.part + 1
         multipart = self.part > 0 or not final
         name = self.cfg.capture_name if hasattr(self.cfg, "capture_name") else ""
-        base = f"official_{self.session_id}" + (f"_{safe_name(name)}" if name else "")
+        base = f"{prof['id'] if prof else 'official'}_{self.session_id}" + (f"_{safe_name(name)}" if name else "")
         if multipart:
             base += f"_part{part_no:02d}"
         filtered = os.path.join(self.workdir, base + ".pcapng")
@@ -297,7 +367,8 @@ class Recorder:
                                anonymize=self.cfg.get("anonymize_local", True),
                                dedupe=(not session.nics_only) or len(inputs) > 1,
                                app=f"{APP_NAME} {VERSION}",
-                               allowed_nets=self.cfg.get("official_networks") or None,
+                               allowed_nets=((prof["networks"] or None) if prof
+                                             else (self.cfg.get("official_networks") or None)),
                                drop_conns=drop_conns, only_local_ports=only_local_ports)
         self._log(f"{'Part ' + str(part_no) + ': k' if multipart else 'K'}ept {stats['packets_out']} of "
                   f"{stats['packets_in']} packets"
@@ -343,7 +414,13 @@ class Recorder:
                 exclude=ignored),
             "ignored_clients": len(ignored),   # game clients on another server, left out
             "server_ports_filter": sorted(keep_ports),
-            "game_server": self.servers_seen.get("official"),
+            # Which server this recording is of. Anything but "official" is another server
+            # recorded on purpose (an extra server profile), not the official game.
+            "server": ({"kind": "extra", "id": prof["id"], "name": prof["name"],
+                        "label": self.servers_seen.get("extra"), "networks": prof["networks"]}
+                       if prof else {"kind": "official", "id": "official",
+                                     "label": self.servers_seen.get("official")}),
+            "game_server": self.servers_seen.get("extra" if prof else "official"),
             "official_networks": self.cfg.get("official_networks"),
             "all_layers": not session.nics_only,
             "loopback": sniffer.summary() if sniffer else None,

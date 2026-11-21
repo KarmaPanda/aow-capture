@@ -11,7 +11,8 @@ from tkinter import messagebox, simpledialog, ttk
 
 from . import APP_NAME, VERSION
 from .config import Config, applog
-from .gameproc import GameWatcher, summarize_clients, tunnel_apps_running
+from .gameproc import GameWatcher, is_recordable, summarize_clients, tunnel_apps_running
+from . import servers as srv
 from .pktmon import cleanup as pktmon_cleanup, pktmon_path
 from .recorder import Recorder
 from . import tray as traymod
@@ -50,6 +51,7 @@ class App:
     def __init__(self, root, start_hidden=False, just_updated=False):
         self.root = root
         self.pending_update = None
+        self.pid_seen = {}               # game pid -> when it was first seen
         self.update_text = None         # "Downloading update … 42%" while one downloads
         self.checkpointing = False
         self.installing_update = False
@@ -262,6 +264,8 @@ class App:
         tester = (info.get("tester") or "").strip()[:32]
         if tester and tester != self.cfg.get("tester_name"):
             self.events.put(("tester", tester))
+        if isinstance(info.get("record_servers"), list):
+            self.events.put(("servers", info["record_servers"]))
         return info
 
     def _check_in(self):
@@ -326,15 +330,16 @@ class App:
             self.start_recording("manual")
 
     def start_recording(self, reason):
-        if getattr(self, "server_kind", None) == "private":
-            self.status.set("The game isn't on the official server; those sessions aren't recorded.")
-            applog(f"Not recording ({reason}): not the official server")
+        kind = getattr(self, "server_kind", None)
+        if kind == "private":
+            self.status.set("The game isn't on a server that is recorded; those sessions aren't recorded.")
+            applog(f"Not recording ({reason}): not a recorded server")
             return
         tunnels = tunnel_apps_running()
         if tunnels:
             self.status.set(f"{', '.join(tunnels)} is running: recording the game's link to it on this PC.")
         try:
-            self.recorder.start(reason)
+            self.recorder.start(reason, target_hint=kind if is_recordable(kind) else None)
         except Exception as e:
             applog(f"Couldn't start recording: {e}")
             self.show_window()
@@ -454,20 +459,31 @@ class App:
             except Exception:
                 pids = set()
             kinds = {}
+            profs = srv.profiles(self.cfg)
             if pids:
                 try:
                     kinds = self.watcher.client_servers(self.cfg.get("official_servers") or (),
-                                                        self.cfg.get("private_servers") or ())
+                                                        self.cfg.get("private_servers") or (), profs)
                 except Exception:
                     pass
-            # Clients on another server are left out (their traffic is never kept); the
-            # others (official, or not known yet) are recorded.
-            others = {pid for pid, (k, _) in kinds.items() if k == "private"}
-            playable = set(pids) - others
-            ident = summarize_clients({p: kinds[p] for p in kinds if p in playable} or kinds)
-            self.events.put(("game", (self.watcher.describe(), ident, len(others) if playable else 0)))
+            now = time.time()
+            self.pid_seen = {p: self.pid_seen.get(p, now) for p in pids}
             if self.recorder.recording and kinds:
                 self.recorder.note_clients(kinds)
+            # Clients on another server are left out (their traffic is never kept); the
+            # others (on the recorded server, or not known yet) are recorded.
+            target = self.recorder.target if self.recorder.recording else None
+            ignored = self.recorder.ignored_pids if self.recorder.recording else set()
+
+            def plays(pid):
+                k = kinds.get(pid, (None, None))[0]
+                if pid in ignored or k == "private":
+                    return False
+                return not (target and is_recordable(k) and k != target)
+            playable = {p for p in pids if plays(p)}
+            others = set(pids) - playable
+            ident = summarize_clients({p: kinds[p] for p in kinds if p in playable} or kinds)
+            self.events.put(("game", (self.watcher.describe(), ident, len(others) if playable else 0)))
             if self.busy:
                 time.sleep(2)
                 continue
@@ -475,7 +491,11 @@ class App:
                 self.game_gone_since = None
                 if self.recorder.recording:
                     self.game_seen_in_capture = True
-                elif self.cfg.get("auto_record"):
+                elif self.cfg.get("auto_record") and (
+                        not profs or any(kinds.get(p, (None,))[0] for p in playable)
+                        or all(now - self.pid_seen[p] >= 10 for p in playable)):
+                    # With other servers that may be recorded, wait (up to 10 s) until the
+                    # game window shows which server it's on: that decides what to record.
                     self.events.put(("autostart", None))
             elif self.recorder.recording and self.game_seen_in_capture:
                 self.game_gone_since = self.game_gone_since or time.time()
@@ -543,6 +563,13 @@ class App:
                     self._tray_action(val)
                 elif kind == "update_ready":
                     self._on_update_ready(val)
+                elif kind == "servers":
+                    profs = srv.normalize(val)
+                    if profs != self.cfg.get("remote_servers"):
+                        self.cfg["remote_servers"] = profs
+                        self.cfg.save()
+                        applog("Servers that may be recorded besides the official one: "
+                               + (", ".join(p["name"] for p in profs) or "none"))
                 elif kind == "tester":
                     self._set_tester(val)
                 elif kind == "upload_url":

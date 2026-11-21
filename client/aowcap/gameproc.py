@@ -179,19 +179,19 @@ class GameWatcher:
             return None
         return ", ".join(f"{self.exe_names.get(p, '?')} (pid {p})" for p in sorted(self.pids))
 
-    def client_servers(self, official_names=("BlueDragon",), private_names=()):
-        """{pid: ("official"|"private"|None, label)}: which server each game client is on."""
+    def client_servers(self, official_names=("BlueDragon",), private_names=(), profiles=()):
+        """{pid: (kind, label)}: which server each game client is on (classify_server)."""
         out = {}
         for pid in sorted(self.pids):
             texts = window_titles(pid) + [a for a in process_cmdline(pid)[1:] if "-" in a]
-            out[pid] = classify_server(texts, official_names, private_names)
+            out[pid] = classify_server(texts, official_names, private_names, profiles)
         return out
 
-    def server_identity(self, official_names=("BlueDragon",), private_names=()):
+    def server_identity(self, official_names=("BlueDragon",), private_names=(), profiles=()):
         """("official"|"private"|None, label) for the running game clients together:
         "official" when any client is on the official server, "private" when the only
         known ones are on other servers."""
-        return summarize_clients(self.client_servers(official_names, private_names))
+        return summarize_clients(self.client_servers(official_names, private_names, profiles))
 
     def exe_version(self, exclude=()):
         """File version of the game exe, for the manifest (Windows only). Clients in
@@ -372,19 +372,25 @@ def process_cmdline(pid):
         return []
 
 
+def is_recordable(kind):
+    return kind == "official" or bool(kind and kind.startswith("extra:"))
+
+
 def summarize_clients(kinds):
-    """kinds: {pid: (kind, label)} -> one (kind, label) for the status line."""
-    for kind in ("official", "private"):
+    """kinds: {pid: (kind, label)} -> one (kind, label) for the status line: the official
+    server first, then any extra server that may be recorded, then other servers."""
+    for want in ("official", "extra:", "private"):
         for k, label in kinds.values():
-            if k == kind:
+            if k and k.startswith(want):
                 return k, label
     return None, None
 
 
-def classify_server(texts, official_names=("BlueDragon",), private_names=()):
+def classify_server(texts, official_names=("BlueDragon",), private_names=(), profiles=()):
     """texts: window titles + command-line args of the game.
 
-    Returns ("official", label), ("private", label) or (None, None) when unknown.
+    Returns ("official", label), ("extra:<id>", label) for a server profile that may be
+    recorded (see servers.py), ("private", label), or (None, None) when unknown.
     A "{Area}-{Server}" label that names no official server counts as private.
     """
     official = [n.lower() for n in official_names]
@@ -396,6 +402,9 @@ def classify_server(texts, official_names=("BlueDragon",), private_names=()):
             return "private", t.strip()
         if any(n in low for n in official):
             return "official", t.strip()
+        for p in profiles:
+            if any(m.lower() in low for m in p["match"]):
+                return f"extra:{p['id']}", t.strip()
         m = None
         if low.startswith("age of wushu"):
             rest = t[len("age of wushu"):].strip()
